@@ -1,0 +1,54 @@
+# ---- ESP-IDF 构建产物 ----
+build/
+build_*/
+*.bin
+# 平台托管的预编译引导层（platform/prebuilt/*.bin）必须随仓库下发，供本地调试烧录，
+# 不受上面的 *.bin 忽略影响。
+!platform/prebuilt/*.bin
+*.elf
+*.map
+*.lst
+flasher_args.json
+flash_args
+project_description.json
+sdkconfig.old
+sdkconfig.ci
+
+# 依赖（由组件管理器按 dependencies.lock 自动下载）
+managed_components/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+
+# ---- 打包产物（由 tools/pack_app.py 导出；*.bin 已在上方被排除） ----
+dist/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+
+# ---- 临时日志 / 抓包产物 ----
+*.log
+*.tmp
+# 历史调试日志与旧版 UI 截图已归档到 docs/archive/，不随仓库下发
+# （archive/README.md 是说明文档，仍需提交）
+docs/archive/logs/
+docs/archive/shots/
+
+# ---- 串口截屏产物（tools/screenshot_recv.py 默认落在仓库根目录）----
+shot_*.jpg
+shot_*.png
+# 注：docs/shots/ 是验收截图，要随仓库下发，不能整目录忽略
+
+# ---- 字体工具 ----
+# lv_font_conv（node_modules）与本地产物
+node_modules/
+# 字体源文件（约 10.5MB，用 tools/fetch_fonts.py 按需下载）
+tools/fonts/*.ttf
+tools/fonts/*.otf
+tools/fonts/*.part
+
+# ---- 本机 / 代理工具目录 ----
+.workbuddy/
