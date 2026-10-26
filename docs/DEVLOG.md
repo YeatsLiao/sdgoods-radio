@@ -340,3 +340,28 @@ sdgoods-radio/
 
 顺手修的另外一个工具 bug：`--pre-boot` 原先只在传了 `--pre` 时才生效，纯 `-t` 截屏会
 在开机瞬间发 `s`，拍到“正在获取城市电台…”的加载态。现已改为**无条件生效**（见 §4.5）。
+
+---
+
+## 9. 首次推送到 GitHub
+
+仓库以 `main` 为默认分支，按功能点分成三个 commit 提交后推送：
+
+| commit | 内容 |
+| --- | --- |
+| `chore: 导入 SDGOODS 平台基座工程` | components / platform / tools / sdgoods-ai / 构建配置 / 平台文档 |
+| `feat: 城市电台应用（点阵主屏 / 设计系统 / 二级页 / 城市目录 / 播放器）` | `main/radio_*`、`main/apps/ui_radio*`、`net_font_20` |
+| `docs: 补 UI 重构规格、调试日志与验收截图，重写根 README` | README / UI_REDESIGN / DEVLOG / ARCHITECTURE / PLAN / `docs/shots` |
+
+推送前处理的两处坑：
+
+1. **索引里残留摊平前的路径**：内层 `.git` 是 0 commit 空仓，但 index 里还留着 `firmware/RADIO/`
+   时期的条目（含已删除的 `README_EN.md`）。先 `git read-tree --empty` 清空索引再重新 `git add`，
+   否则第一次提交会带上磁盘上不存在的文件。
+2. **`git push` 直连 GitHub 报 `Connection was reset`**：本机靠 `127.0.0.1:7890` 代理出网，
+   而 git 不读 Windows 系统代理设置。给本仓库加 `git config http.proxy http://127.0.0.1:7890`
+   （只写进 `.git/config`，不进版本库）之后推送才通。
+
+推送结果：`origin/main` = 3 个 commit / 203 个受版本控制文件；`build/`、`managed_components/`、
+字体源文件（`tools/fonts/*.ttf`）与 `docs/archive/` 下的历史产物按 `.gitignore` 留在本地。
+
