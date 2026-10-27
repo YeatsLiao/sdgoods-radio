@@ -579,7 +579,11 @@ lv_obj_t *rk_round_btn(lv_obj_t *parent, lv_coord_t x, lv_coord_t y, lv_coord_t 
     lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(btn, bg, 0);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_70, LV_STATE_PRESSED);
+    /* 按下反馈：整块（含图标）压到 60% 不透明。
+     * 原来只改 bg_opa，图标仍全亮 —— 反色的播放键按下去只是「底色淡一点」，
+     * 实拍几乎看不出这一下有没有被接住，手感就成了「点了没反应」。
+     * 改 obj 级别 opa 后，底色和图标一起下沉，一帧内就能看到回应。 */
+    lv_obj_set_style_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
 
     lv_obj_t *ic = rk_icon(btn, size, kind, fg);
     lv_obj_center(ic);
@@ -703,14 +707,21 @@ void rk_page_open(rk_page_t *p, lv_obj_t *parent, const char *title)
     lv_label_set_text(p->title, title ? title : "");
     lv_obj_set_style_text_font(p->title, RK_FONT_BODY, 0);
     lv_obj_set_style_text_color(p->title, th->ink, 0);
-    lv_obj_set_pos(p->title, 58, 62);
-    lv_obj_set_width(p->title, 130);
+    lv_obj_set_pos(p->title, 58, 58);
+    lv_obj_set_width(p->title, 96);
     lv_label_set_long_mode(p->title, LV_LABEL_LONG_DOT);
     lv_obj_clear_flag(p->title, LV_OBJ_FLAG_CLICKABLE);
 
-    lv_obj_t *close = rk_icon(p->root, 34, RK_ICON_CLOSE, th->muted);
-    lv_obj_set_pos(close, 274, 58);
-    lv_obj_add_flag(close, LV_OBJ_FLAG_CLICKABLE);
+    /* 关闭键：44×44 圆形按钮，不能再用浮图标。
+     * 原来是 34px 裸图标贴 (274,58)：环线在 y=58 处只到 x≈289，图标右半截连同
+     * 命中区一起坐在圆屏黑角上，手指按过去时大半落在纯黑区域 —— 这就是「难点到」。
+     * 现在给圆底（让可点范围可见）、往里收到 232，中心离屏幕右沿 80px，
+     * 完全落在圆内；命中面积 44² 比原来 34² 大 67%。
+     * y 收到 43：底边 86 与 y=90 的分隔线留 4px 间隙，不让线从按钮底下穿出来；
+     * 右上角 (276,43) 到圆心 167px，仍在环内。
+     * 底色取 muted 的 27%（mix 70）：再亮一档就成整页最重的色块，抢过标题。 */
+    lv_obj_t *close = rk_round_btn(p->root, 232, 43, 44, RK_ICON_CLOSE,
+                                   lv_color_mix(th->muted, th->bg, 70), th->muted);
     sdgoods_tap_bind(close, &p->close_ctx, page_close_cb, p);
 
     rk_hairline(p->root, 58, 90, 244, th->hair);
@@ -753,11 +764,11 @@ void rk_page_action(rk_page_t *p, const char *text, sdgoods_tap_ctx_t *ctx,
     const rk_theme_t *th = rk_theme();
     lv_obj_t *b = lv_obj_create(p->root);
     lv_obj_remove_style_all(b);
-    lv_obj_set_pos(b, 196, 62);
-    lv_obj_set_size(b, 72, 24);
+    lv_obj_set_pos(b, 160, 56);
+    lv_obj_set_size(b, 56, 26);
     lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_radius(b, 12, 0);
+    lv_obj_set_style_radius(b, 13, 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
     lv_obj_set_style_bg_color(b, th->card, LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
