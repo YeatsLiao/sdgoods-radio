@@ -109,7 +109,13 @@ void app_main(void)
      *   LVGL 建缓冲时内部 DMA 最大连续块只剩 ~10KB，随后界面一建就掉到 ~1.4KB，
      *   整屏 flush 分片分配失败 -> 屏幕不更新（「下滑没有控制中心」「打不开 app0」）。 */
     ESP_ERROR_CHECK(sdgoods_wifi_init());
-    ESP_ERROR_CHECK(sdgoods_ble_init());
+    /* ⚠️ BLE 刻意不初始化（不要随手加回来）：
+     *   · 本固件是城市电台，全工程对 sdgoods_ble_list() 的调用数为 0 —— 不扫描、不联机；
+     *   · 而 Bluedroid + BT controller 一 init 就常驻吃内部 RAM，把 SPI 弹跳缓冲的
+     *     余量挤到 <4096B（每片 4092B，队列 2 需 8192B 连续块）⇒ 播放时整屏不再刷新，
+     *     日志表现为 `draw_bitmap FAILED err=0x101` + `internal DMA largest_free=3840`。
+     *   需要蓝牙扫描时把下面一行恢复即可（功能本身没删，只是不启动）。 */
+    // ESP_ERROR_CHECK(sdgoods_ble_init());
     ESP_ERROR_CHECK(sdgoods_audio_init());
 
     /* 配网：在 sdgoods_wifi_init（基础 STA 初始化）之上启动 SoftAP/STA 状态机。
