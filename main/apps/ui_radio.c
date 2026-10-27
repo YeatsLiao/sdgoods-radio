@@ -3,7 +3,8 @@
  *
  * 设计见 docs/UI_REDESIGN.md。这里只做三件事：
  *   ① 搭主屏（表盘环 / 点阵英雄 / 台名元信息 / dock）；
- *   ② 把触摸翻译成意图（点按 = 播放暂停，横向拖拽 = 调台，长按 = 设置）；
+ *   ② 把触摸翻译成意图（点按 = 播放暂停，横向拖拽 = 调台）；
+ *      长按刻意不做任何事：它与横滑抢同一块触摸区，见下方手势段注释。
  *   ③ 每 tick 把播放器状态、目录状态、时钟、电平、休眠映射成界面。
  *
  * 页面（列表/设置/选择器/WiFi）在 ui_radio_pages.c；绘制原语在 ui_radio_kit.c。
@@ -28,6 +29,8 @@
 #include "radio_player.h"
 #include "radio_settings.h"
 #include "sdgoods_app_shell.h"
+#include "sdgoods_audio.h"
+#include "sdgoods_cc.h"
 #include "sdgoods_lcd.h"
 #include "ui_radio_kit.h"
 #include "ui_radio_pages.h"
@@ -35,25 +38,43 @@
 
 static const char *TAG = "UI_RADIO";
 
-/* ---- 布局（360×360 圆屏，圆心 180,180；顶部 50px 留给控制中心手势）---- */
+/* ---- 布局（360×360 圆屏，圆心 180,180；顶部 50px 留给控制中心手势）----
+ *
+ * 信息分层（主屏重写）：状态行 → 点阵（唯一焦点）→ 台名 → 副信息 → 电平/环 → dock。
+ * 页头只放三个实时读数：时间 / 电量 / 播放状态。品牌小字「CITY RADIO」已删：
+ * 这一行在圆屏顶上只有 212px 可用，三个读数本来就快站满，品牌字价值最低。
+ *
+ * 圆屏的硬约束：文字行越靠上，左右可用宽度越窄。环半径 168，y=56 那一行
+ * 只有 x∈[70,290] 可用（再往外就是黑角），所以页头左右都往里收，不贴边。 */
 #define HERO_X       30
-#define HERO_Y       98
+#define HERO_Y       96
 #define HERO_W       300
 #define HERO_H       66
-#define NAME_Y       166
-#define META_Y       196
-#define BARS_BASE    234
-#define BARS_N       RADIO_PLAYER_LEVELS
-#define BARS_W       5
-#define BARS_GAP     5
+#define NAME_Y       170
+#define META_Y       202
+#define BARS_BASE    242
+#define BARS_N       12          /* 18 → 12：缩短整行，两端不再顶到环 */
+#define BARS_W       6
+#define BARS_GAP     6
+#define BARS_MAX_H   12          /* 单根最高高度 18 → 12，降为中景 */
 #define RING_SIZE    360
 #define RING_R       168
-#define CHIP_Y       240
-#define CHIP_H       24
-#define DOCK_Y       276
-#define DOCK_PLAY_X  152
-#define DOCK_PLAY_Y  268
-#define DOCK_PLAY_S  56
+#define BAT_X        146         /* 电池外框：页头中段，与时间/状态三等分 */
+#define BAT_Y        59
+#define BAT_W        18
+#define BAT_H        10
+#define DOCK_X0      88          /* 三键同一行，中心 112 / 180 / 248（等距 68） */
+#define DOCK_X1      156
+#define DOCK_X2      224
+#define DOCK_Y       272         /* 中心 y=296：到圆心 134，外缘 158 < 168，不出环 */
+#define DOCK_S       48
+
+/* 底部上滑：拉起电台列表。
+ * 平台的 BOTTOM_ZONE 只用于关闭菜单浮层，不是 app 屏手势；列表页原先靠 dock 里的
+ * 一个图标键，占掉四个 action 里的一个。改成「从底部往上推」——和顶部下滑进控制
+ * 中心对称，dock 就腾出位置给播放三键。 */
+#define SWIPE_ZONE   60
+#define SWIPE_UP_DY  46
 
 #define SKIP_MAX     3          /* 连续失败跳台上限 */
 #define DRAG_STEP    26         /* 每 26px 换一台 */
@@ -68,8 +89,12 @@ static rk_ring_t   s_ring;
 static lv_obj_t   *s_name;
 static lv_obj_t   *s_meta;
 static lv_obj_t   *s_clock;
-static lv_obj_t   *s_wifi_dot;
-static lv_obj_t   *s_chip;
+static lv_obj_t   *s_live_dot;    /* 状态行前的红点：只有「在播」才亮 */
+static lv_obj_t   *s_live_lbl;    /* 直播中 / 缓冲中 / 已暂停 / 未连接 */
+static lv_obj_t   *s_bat_shell;   /* 电池外框（低电量时边框转红） */
+static lv_obj_t   *s_bat_fill;    /* 电池内部填充条，宽度随电量 */
+static lv_obj_t   *s_bat_lbl;     /* 87% */
+static lv_obj_t   *s_swipe;       /* 底部上滑捕获带 */
 static lv_obj_t   *s_play_btn;
 static lv_obj_t   *s_bars[BARS_N];
 
@@ -77,12 +102,12 @@ static char s_last_hero[12];
 static char s_last_name[RADIO_NAME_MAX + 4];
 static char s_last_meta[80];
 static char s_last_clock[8];
+static char s_last_live[16];
 
 static int  s_cur_idx = -1;
 static int  s_preview_idx = -1;
 static bool s_paused;
 static bool s_dragging;
-static bool s_long_fired;
 static lv_coord_t s_touch_x, s_touch_y;
 static radio_player_state_t s_last_state = RP_IDLE;
 
@@ -101,9 +126,13 @@ static uint32_t s_sleep_deadline;
 static uint32_t s_clock_ms;
 static bool s_ntp_started;
 static bool s_wifi_seen;
+static lv_coord_t s_swipe_y0;          /* 底部上滑的按下 y */
+static int  s_bat_pct = -2;           /* -2 未读过，-1 读失败，0..100 */
+static uint32_t s_bat_ms;
+static char s_last_bat[8];
 
 /* 点按上下文（静态存储，生命周期覆盖对应对象） */
-static sdgoods_tap_ctx_t s_ctx_prev, s_ctx_next, s_ctx_play, s_ctx_chip, s_ctx_brand;
+static sdgoods_tap_ctx_t s_ctx_prev, s_ctx_next, s_ctx_play, s_ctx_brand;
 
 static void build_screen(void);
 static void refresh_ui(bool preview);
@@ -125,20 +154,18 @@ static void set_text(lv_obj_t *lbl, char *cache, size_t cap, const char *text)
     lv_label_set_text(lbl, cache);
 }
 
-static const char *city_label(void)
+/* 状态行右侧那一词：整屏唯一的状态出口（不再散落在 meta 里）。
+ * 带「直播中」时前面的点才是红色 —— 其余一律 hair，避免红色被普通状态稀释。 */
+static const char *live_word(radio_player_state_t st, bool paused)
 {
-    return s_city[0] ? s_city : "城市电台";
-}
-
-static const char *state_word(radio_player_state_t st, bool paused)
-{
+    if (wifi_prov_get_state() != WIFI_STATE_CONNECTED) return "未连接";
     if (paused || st == RP_PAUSED) return "已暂停";
     switch (st) {
     case RP_CONNECTING: return "连接中";
     case RP_BUFFERING:  return "缓冲中";
-    case RP_ERROR:      return "信号中断";
-    case RP_PLAYING:    return NULL;
-    default:            return NULL;
+    case RP_ERROR:      return "重连中";
+    case RP_PLAYING:    return "直播中";
+    default:            return "待播放";
     }
 }
 
@@ -151,8 +178,15 @@ static void set_play_icon(bool playing)
     if (!ic) {
         return;
     }
-    lv_obj_set_user_data(ic, (void *)(uintptr_t)(playing ? RK_ICON_PAUSE : RK_ICON_PLAY));
+    const rk_icon_t want = playing ? RK_ICON_PAUSE : RK_ICON_PLAY;
+    if ((rk_icon_t)(uintptr_t)lv_obj_get_user_data(ic) == want) {
+        return;                 /* 没变就别 invalidate：refresh_ui 可能一轮跑好几次 */
+    }
+    lv_obj_set_user_data(ic, (void *)(uintptr_t)want);
     lv_obj_invalidate(ic);
+    /* 带毫秒时间戳：和下方 toggle 日志对一下，就能量出「点下去到图标翻」的真实延迟 */
+    ESP_LOGI(TAG, "play icon -> %s @%u", playing ? "pause" : "play",
+             (unsigned)lv_tick_get());
 }
 
 /* ==========================================================================
@@ -232,6 +266,8 @@ static void step_play(int dir)
 static void toggle_play(void)
 {
     radio_player_state_t st = radio_player_state();
+    ESP_LOGI(TAG, "toggle tap @%u (state=%d paused=%d)", (unsigned)lv_tick_get(),
+             (int)st, (int)s_paused);
     if (radio_catalog_count() <= 0) {
         open_settings();
         return;
@@ -253,7 +289,13 @@ static void toggle_play(void)
 }
 
 /* ==========================================================================
- * 触摸：点按 = 播放暂停；横向拖拽 = 调台；长按 = 设置
+ * 触摸：点按 = 播放暂停；横向拖拽 = 调台（实时预览，松手生效）
+ *
+ * ⚠️ 这里**没有长按**。原先「长按 = 设置」与「按住左右滑 = 切台」抢同一块触摸区：
+ *    LVGL 的 LONG_PRESSED 在 400ms 时**不看位移**就发出，而横滑要位移 > DRAG_START
+ *    才成立 ⇒ 用户按住准备滑，400ms 一到设置就先弹出来了；反过来手指轻抖一点又
+ *    直接进拖台，长按永远轮不到。现在两个手势各自独占一条判定路径：位移优先，
+ *    长按彻底不存在（设置只从控制中心进）。
  * ======================================================================== */
 static void drag_pressed(lv_event_t *e)
 {
@@ -267,7 +309,6 @@ static void drag_pressed(lv_event_t *e)
     s_touch_x = p.x;
     s_touch_y = p.y;
     s_dragging = false;
-    s_long_fired = false;
     s_preview_idx = s_cur_idx;
 }
 
@@ -318,11 +359,6 @@ static void drag_released(lv_event_t *e)
     int dx = (int)p.x - (int)s_touch_x;
     int dy = (int)p.y - (int)s_touch_y;
 
-    if (s_long_fired) {
-        s_long_fired = false;
-        s_dragging = false;
-        return;
-    }
     if (s_dragging) {
         s_dragging = false;
         if (s_preview_idx >= 0 && s_preview_idx != s_cur_idx) {
@@ -348,16 +384,6 @@ static void drag_press_lost(lv_event_t *e)
     }
 }
 
-static void drag_long_pressed(lv_event_t *e)
-{
-    (void)e;
-    if (radio_pages_any_open()) {
-        return;
-    }
-    s_long_fired = true;
-    open_settings();
-}
-
 /* dock / 胶囊 */
 static void on_prev(void *ud)
 {
@@ -377,10 +403,32 @@ static void on_play(void *ud)
     toggle_play();
 }
 
-static void on_open_list(void *ud)
+/* 底部上滑 → 电台列表。只认「从捕获带内起手 + 向上位移过阈」，横向拖拽不触发。 */
+static void swipe_pressed(lv_event_t *e)
 {
-    (void)ud;
-    radio_pages_open_list(s_scr);
+    (void)e;
+    lv_indev_t *in = lv_indev_get_act();
+    if (!in) {
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    s_swipe_y0 = p.y;
+}
+
+static void swipe_released(lv_event_t *e)
+{
+    (void)e;
+    lv_indev_t *in = lv_indev_get_act();
+    if (!in || !s_scr || radio_pages_any_open()) {
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    if (s_swipe_y0 >= LCD_HEIGHT - SWIPE_ZONE &&
+        (int)p.y - (int)s_swipe_y0 <= -SWIPE_UP_DY) {
+        radio_pages_open_list(s_scr);
+    }
 }
 
 static void open_settings(void)
@@ -445,44 +493,47 @@ static void refresh_ui(bool preview)
     }
     set_text(s_name, s_last_name, sizeof(s_last_name), name);
 
-    /* 元信息：状态优先，其次才是「城市 · 码率 · 序号」 */
-    char meta[80];
+    /* 状态行：整屏唯一的状态出口。红点只在真正出声时亮。 */
+    if (s_live_lbl) {
+        set_text(s_live_lbl, s_last_live, sizeof(s_last_live), live_word(state, s_paused));
+    }
+    if (s_live_dot) {
+        const bool live = (state == RP_PLAYING && !s_paused);
+        lv_obj_set_style_bg_color(s_live_dot, live ? rk_theme()->accent : rk_theme()->hair, 0);
+    }
+
+    /* 副信息：编码 + 实际采样率（解码首帧后才知道，之前回退到码率）。
+     * 这里曾经写死「网络电台」—— 本机只播网络台，这句话恒为真也恒无用，
+     * 属于占了版面不传信息的填充字。改成一条真实的技术参数，宁可留白。 */
+    char meta[32];
+    meta[0] = '\0';
     if (!s_catalog_ready && n == 0) {
-        snprintf(meta, sizeof(meta), "正在获取城市电台…");
+        snprintf(meta, sizeof(meta), "正在获取…");
     } else if (n == 0) {
         snprintf(meta, sizeof(meta), "请先连接 WiFi");
     } else {
-        const char *w = state_word(state, s_paused);
-        if (w) {
-            snprintf(meta, sizeof(meta), "%s · %d/%d", w, idx + 1, n);
+        const char *codec = (st && st->codec[0]) ? st->codec : NULL;
+        uint32_t sr = radio_player_sample_rate();
+        if (codec && sr > 0) {
+            snprintf(meta, sizeof(meta), "%s · %u kHz", codec, (unsigned)(sr / 1000));
+        } else if (sr > 0) {
+            snprintf(meta, sizeof(meta), "%u kHz", (unsigned)(sr / 1000));
         } else if (st && st->bitrate > 0) {
-            snprintf(meta, sizeof(meta), "%s · %uk · %d/%d", city_label(),
-                     (unsigned)st->bitrate, idx + 1, n);
-        } else {
-            snprintf(meta, sizeof(meta), "%s · %d/%d", city_label(), idx + 1, n);
+            snprintf(meta, sizeof(meta), "%u kbps", (unsigned)st->bitrate);
+        } else if (codec) {
+            snprintf(meta, sizeof(meta), "%s", codec);
         }
     }
     set_text(s_meta, s_last_meta, sizeof(s_last_meta), meta);
 
-    /* dock 播放图标 */
-    set_play_icon(state == RP_PLAYING || state == RP_CONNECTING || state == RP_BUFFERING);
-
-    /* 胶囊：台数 */
-    if (s_chip) {
-        char buf[32];
-        if (n > 0) {
-            snprintf(buf, sizeof(buf), "电台列表 · %d", n);
-        } else {
-            snprintf(buf, sizeof(buf), "电台列表");
-        }
-        rk_pill_set_text(s_chip, buf);
-    }
-
-    /* WiFi 点 */
-    if (s_wifi_dot) {
-        bool on = (wifi_prov_get_state() == WIFI_STATE_CONNECTED);
-        lv_obj_set_style_bg_color(s_wifi_dot, on ? rk_theme()->accent : rk_theme()->muted, 0);
-    }
+    /* dock 播放图标：以「用户意图」为准（s_paused），不能只读 state。
+     * radio_player_set_paused() 过去只置 s_paused，真正的 s_state 翻转要等解码
+     * 循环跑到下一轮 —— 而那一轮可能正阻塞在一次 i2s 写里，于是同一次点击在
+     * 屏幕上出现两种时序：电平条和状态词（它们本来就用 s_paused）立即变，
+     * 只有这颗图标晚一拍才翻，手感就是「点了没反应，过一会才切」。 */
+    const bool playing = !s_paused &&
+                         (state == RP_PLAYING || state == RP_CONNECTING || state == RP_BUFFERING);
+    set_play_icon(playing);
 }
 
 static void update_bars(radio_player_state_t st)
@@ -497,7 +548,7 @@ static void update_bars(radio_player_state_t st)
         }
         lv_obj_clear_flag(s_bars[i], LV_OBJ_FLAG_HIDDEN);
         int v = (i < n) ? lv[i] : 0;
-        lv_coord_t h = 2 + 16 * v / 255;
+        lv_coord_t h = 2 + (BARS_MAX_H - 2) * v / 255;
         lv_obj_set_height(s_bars[i], h);
         lv_obj_set_y(s_bars[i], BARS_BASE - h);
     }
@@ -534,6 +585,49 @@ static void clock_maybe_start(void)
     ESP_LOGI(TAG, "sntp started");
 }
 
+/* 电池：一次采样改三处（填充条宽度 / 低电量转红 / 百分比文字）。
+ * ADC 不能每秒采，调用方按 5s 节流。pct<0 = 读失败（平台层返回 -1），
+ * 此时填充条画满但转 muted，避免「读不到」被误认为「满电」。 */
+static void update_battery(void)
+{
+    int pct = sdgoods_cc_bat_read(NULL);
+    if (pct > 100) {
+        pct = 100;
+    } else if (pct < 0) {
+        pct = -1;
+    }
+    if (pct == s_bat_pct) {
+        return;
+    }
+    s_bat_pct = pct;
+    const rk_theme_t *th = rk_theme();
+    const bool low = (pct >= 0 && pct <= 20);
+
+    if (s_bat_lbl) {
+        char buf[8];
+        if (pct < 0) {
+            snprintf(buf, sizeof(buf), "--%%");
+        } else {
+            snprintf(buf, sizeof(buf), "%d%%", pct);
+        }
+        set_text(s_bat_lbl, s_last_bat, sizeof(s_last_bat), buf);
+    }
+    if (s_bat_fill) {
+        lv_coord_t full = BAT_W - 4;
+        lv_coord_t w = (pct < 0) ? full : (lv_coord_t)(full * pct / 100);
+        if (w < 2) {
+            w = 2;              /* 不能整条消失：那是「没装电池」的观感 */
+        }
+        lv_obj_set_width(s_bat_fill, w);
+        /* 读失败用 muted 填满 =「有电但读不到」；≤20% 用 accent 明说该充电 */
+        lv_obj_set_style_bg_color(s_bat_fill,
+                                  (pct < 0) ? th->muted : (low ? th->accent : th->ink), 0);
+    }
+    if (s_bat_shell) {
+        lv_obj_set_style_border_color(s_bat_shell, low ? th->accent : th->muted, 0);
+    }
+}
+
 /* ==========================================================================
  * 主屏构建
  * ======================================================================== */
@@ -556,35 +650,83 @@ static void build_screen(void)
     lv_obj_add_event_cb(s_drag, drag_pressing, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(s_drag, drag_released, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(s_drag, drag_press_lost, LV_EVENT_PRESS_LOST, NULL);
-    lv_obj_add_event_cb(s_drag, drag_long_pressed, LV_EVENT_LONG_PRESSED, NULL);
 
-    /* 页头：品牌（点按进设置）/ WiFi 点 / 时钟 */
-    lv_obj_t *brand = rk_box(s_scr, 52, 56, 108, 28);
+    /* 底部上滑捕获带：只取最后 60px。dock 的三个键在本对象之后创建，命中优先级
+     * 更高，所以按播放键不会被这条带子吃掉；带内只做「向上推」判定，
+     * 没推过阈则什么都不发生（不会误触播放暂停）。 */
+    s_swipe = rk_box(s_scr, 0, LCD_HEIGHT - SWIPE_ZONE, LCD_WIDTH, SWIPE_ZONE);
+    lv_obj_add_flag(s_swipe, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_swipe, swipe_pressed, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_swipe, swipe_released, LV_EVENT_RELEASED, NULL);
+
+    /* 手势条：底部中央一根 18×3 的短横，移动端通用的「这页可上滑」语汇。
+     * 列表键从 dock 拿走后，「怎么开列表」就没任何文字提示了，只能靠这根条。
+     * 它是 s_swipe 的子对象 ⇒ 不新增指针；rk_box 默认不可点 ⇒ 不抢上滑手势。 */
+    lv_obj_t *grip = rk_box(s_swipe, (LCD_WIDTH - 18) / 2, SWIPE_ZONE - 20, 18, 3);
+    lv_obj_set_style_bg_color(grip, lv_color_mix(th->muted, th->bg, 90), 0);
+    lv_obj_set_style_bg_opa(grip, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(grip, 2, 0);
+
+    /* 页头：时间（左）· 电量（中）· 播放状态（右）
+     *
+     * 圆屏顶部的可见宽度只有中间那一段：环半径 168，y=56 处 x 只到 70 和 290，
+     * 再往外就是黑角。三段等分这 208px：时间从 70 起、状态右对齐 282、电量居中。
+     * 品牌热区暂时保留——它是抽屉（§16）上线前唯一的「设置」入口。 */
+    lv_obj_t *brand = rk_box(s_scr, 70, 54, 60, 24);
     lv_obj_add_flag(brand, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_t *brand_lbl = lv_label_create(brand);
-    lv_label_set_text(brand_lbl, "城市电台");
-    lv_obj_set_style_text_font(brand_lbl, RK_FONT_SMALL, 0);
-    lv_obj_set_style_text_color(brand_lbl, th->ink, 0);
-    lv_obj_set_style_text_letter_space(brand_lbl, 1, 0);
-    lv_obj_set_pos(brand_lbl, 6, 6);
-    lv_obj_clear_flag(brand_lbl, LV_OBJ_FLAG_CLICKABLE);
     sdgoods_tap_bind(brand, &s_ctx_brand, (sdgoods_tap_cb_t)on_brand, NULL);
 
-    s_wifi_dot = rk_box(s_scr, 302, 69, 8, 8);
-    lv_obj_set_style_radius(s_wifi_dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(s_wifi_dot, th->muted, 0);
-    lv_obj_set_style_bg_opa(s_wifi_dot, LV_OPA_COVER, 0);
-
-    s_clock = lv_label_create(s_scr);
+    s_clock = lv_label_create(brand);
     lv_label_set_text(s_clock, "--:--");
     lv_obj_set_style_text_font(s_clock, RK_FONT_SMALL, 0);
-    lv_obj_set_style_text_color(s_clock, th->muted, 0);
-    lv_obj_set_style_text_align(s_clock, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_pos(s_clock, 244, 64);
-    lv_obj_set_width(s_clock, 50);
+    lv_obj_set_style_text_color(s_clock, th->ink, 0);
+    lv_obj_set_pos(s_clock, 0, 0);
     lv_obj_clear_flag(s_clock, LV_OBJ_FLAG_CLICKABLE);
 
-    rk_hairline(s_scr, 58, 90, 244, th->hair);
+    /* 电池：外框 + 正极 + 内部填充条。三截都是普通 rk_box，
+     * 不新增任何绘制回调 —— 电量只是改填充条宽度。
+     * 18×10 这个尺寸下边框必须给满不透明：60% 的 muted 在暗底上几乎不可见，
+     * 实拍下电池就退化成「一块白条 + 一枚小点」，看不出是电池。 */
+    s_bat_shell = rk_box(s_scr, BAT_X, BAT_Y, BAT_W, BAT_H);
+    lv_obj_set_style_bg_opa(s_bat_shell, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_bat_shell, 1, 0);
+    lv_obj_set_style_border_color(s_bat_shell, th->muted, 0);
+    lv_obj_set_style_border_opa(s_bat_shell, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_bat_shell, 2, 0);
+    lv_obj_set_style_pad_all(s_bat_shell, 0, 0);
+
+    lv_obj_t *nub = rk_box(s_scr, BAT_X + BAT_W, BAT_Y + 3, 2, 4);
+    lv_obj_set_style_bg_color(nub, th->muted, 0);
+    lv_obj_set_style_bg_opa(nub, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(nub, 1, 0);
+
+    s_bat_fill = rk_box(s_bat_shell, 2, 2, BAT_W - 4, BAT_H - 4);
+    lv_obj_set_style_bg_color(s_bat_fill, th->ink, 0);
+    lv_obj_set_style_bg_opa(s_bat_fill, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_bat_fill, 1, 0);
+
+    s_bat_lbl = lv_label_create(s_scr);
+    lv_label_set_text(s_bat_lbl, "--%");
+    lv_obj_set_style_text_font(s_bat_lbl, RK_FONT_SMALL, 0);
+    lv_obj_set_style_text_color(s_bat_lbl, th->muted, 0);
+    lv_obj_set_pos(s_bat_lbl, BAT_X + BAT_W + 6, 54);
+    lv_obj_clear_flag(s_bat_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+    s_live_dot = rk_box(s_scr, 228, 61, 6, 6);
+    lv_obj_set_style_radius(s_live_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_live_dot, th->hair, 0);
+    lv_obj_set_style_bg_opa(s_live_dot, LV_OPA_COVER, 0);
+
+    s_live_lbl = lv_label_create(s_scr);
+    lv_label_set_text(s_live_lbl, "");
+    lv_obj_set_style_text_font(s_live_lbl, RK_FONT_SMALL, 0);
+    lv_obj_set_style_text_color(s_live_lbl, th->muted, 0);
+    lv_obj_set_style_text_align(s_live_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(s_live_lbl, 234, 54);
+    lv_obj_set_width(s_live_lbl, 48);
+    lv_obj_clear_flag(s_live_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+    rk_hairline(s_scr, 62, 88, 236, th->hair);
 
     /* 点阵英雄 */
     rk_dot_create(&s_dot, s_scr, HERO_X, HERO_Y, HERO_W, HERO_H, 6, 4);
@@ -625,17 +767,19 @@ static void build_screen(void)
         lv_obj_add_flag(s_bars[i], LV_OBJ_FLAG_HIDDEN);
     }
 
-    /* 胶囊：电台列表 */
-    s_chip = rk_pill(s_scr, 110, CHIP_Y, 140, CHIP_H, "电台列表", th->card, th->ink);
-    sdgoods_tap_bind(s_chip, &s_ctx_chip, (sdgoods_tap_cb_t)on_open_list, NULL);
-
-    /* dock */
-    lv_obj_t *prev = rk_round_btn(s_scr, 96, DOCK_Y, 40, RK_ICON_PREV, th->card, th->ink);
+    /* dock：3 个动作同一行（上一台 / 播放 / 下一台）。
+     * 列表改成底部上滑后，这里从 4 键收回 3 键 —— 三键等距 68，重心正落在
+     * 圆心 x=180，比原来四键一直偏左的排布稳。播放键反色仍是唯一高对比按钮。 */
+    lv_obj_t *prev = rk_round_btn(s_scr, DOCK_X0, DOCK_Y, DOCK_S, RK_ICON_PREV,
+                                  th->card, th->ink);
     sdgoods_tap_bind(prev, &s_ctx_prev, (sdgoods_tap_cb_t)on_prev, NULL);
-    s_play_btn = rk_round_btn(s_scr, DOCK_PLAY_X, DOCK_PLAY_Y, DOCK_PLAY_S,
+
+    s_play_btn = rk_round_btn(s_scr, DOCK_X1, DOCK_Y, DOCK_S,
                               RK_ICON_PLAY, th->ink, th->on_accent);
     sdgoods_tap_bind(s_play_btn, &s_ctx_play, (sdgoods_tap_cb_t)on_play, NULL);
-    lv_obj_t *next = rk_round_btn(s_scr, 224, DOCK_Y, 40, RK_ICON_NEXT, th->card, th->ink);
+
+    lv_obj_t *next = rk_round_btn(s_scr, DOCK_X2, DOCK_Y, DOCK_S, RK_ICON_NEXT,
+                                  th->card, th->ink);
     sdgoods_tap_bind(next, &s_ctx_next, (sdgoods_tap_cb_t)on_next, NULL);
 
     /* 应用外壳：顶部下滑控制中心 + 设备级手势策略 */
@@ -654,8 +798,12 @@ static void rebuild_ui(void)
     s_name = NULL;
     s_meta = NULL;
     s_clock = NULL;
-    s_wifi_dot = NULL;
-    s_chip = NULL;
+    s_live_dot = NULL;
+    s_live_lbl = NULL;
+    s_bat_shell = NULL;
+    s_bat_fill = NULL;
+    s_bat_lbl = NULL;
+    s_swipe = NULL;
     s_play_btn = NULL;
     memset(&s_ring, 0, sizeof(s_ring));
     memset(&s_dot, 0, sizeof(s_dot));
@@ -666,6 +814,9 @@ static void rebuild_ui(void)
     s_last_name[0] = '\0';
     s_last_meta[0] = '\0';
     s_last_clock[0] = '\0';
+    s_last_live[0] = '\0';
+    s_last_bat[0] = '\0';
+    s_bat_pct = -2;             /* 新对象上的填充条是满宽，必须重算一次 */
 
     build_screen();
     if (old) {
@@ -793,6 +944,12 @@ static void radio_tick(lv_timer_t *t)
         }
     }
 
+    /* 电量 5s 一次：ADC 采样比时钟贵得多，且电量变化本来没这么快 */
+    if (now - s_bat_ms >= 5000) {
+        s_bat_ms = now;
+        update_battery();
+    }
+
     /* 定时休眠到点 */
     if (s_sleep_armed && (int32_t)(now - s_sleep_deadline) >= 0) {
         s_sleep_armed = false;
@@ -872,8 +1029,12 @@ static void close_to_app(void)
     s_name = NULL;
     s_meta = NULL;
     s_clock = NULL;
-    s_wifi_dot = NULL;
-    s_chip = NULL;
+    s_live_dot = NULL;
+    s_live_lbl = NULL;
+    s_bat_shell = NULL;
+    s_bat_fill = NULL;
+    s_bat_lbl = NULL;
+    s_swipe = NULL;
     s_play_btn = NULL;
     memset(&s_ring, 0, sizeof(s_ring));
     memset(&s_dot, 0, sizeof(s_dot));
@@ -946,8 +1107,19 @@ void ui_radio_close(void)
  *
  *   'l' 打开电台列表   'k' 打开设置   'w' 设置页首行 WiFi   'n' 切纸张/夜色
  *   'x' 关掉所有页面回主屏                         '1'..'9' 播第 N 台
+ *   'v' 直接打开音量滑块页（平台 which=3）——没有手指，
+ *       「拖音量卡顿 / 拖完静音」只能靠它离线复现
+ *   'g' 在音量页上合成一次横拖（先发 'v' 再发 'g'）
+ *   'm' 音量页的静音开关：打开页 + 点一下（再发一次就是点第二下）
  * ========================================================================== */
 static char s_qa_cmd;
+
+/* 'm' 的第二段：等页面布局完成后再合成点静音按钮（坐标见 sdgoods_cc.c 的 open_slider） */
+static void mute_tap_later(lv_timer_t *t)
+{
+    lv_timer_del(t);
+    sdgoods_tap_synth_now(180, 252, 0, 0, 1);
+}
 
 static void qa_apply(void *arg)
 {
@@ -959,10 +1131,14 @@ static void qa_apply(void *arg)
     }
     switch (c) {
     case 'l':
-        sdgoods_tap_synth(110 + 70, CHIP_Y + CHIP_H / 2, 0, 0, 1);   /* 「电台列表」胶囊 */
+        /* 列表改成底部上滑：从屏幕最下沿往上推 64px（每帧 8px × 8 帧） */
+        sdgoods_tap_synth(180, LCD_HEIGHT - 20, 0, -8, 8);
         break;
     case 'k':
-        sdgoods_tap_synth(106, 70, 0, 0, 1);                        /* 左上品牌字 */
+        sdgoods_tap_synth(100, 66, 0, 0, 1);                         /* 页头左侧时间（暂兼设置入口） */
+        break;
+    case 'p':
+        sdgoods_tap_synth(DOCK_X1 + DOCK_S / 2, DOCK_Y + DOCK_S / 2, 0, 0, 1);  /* 点 dock 播放键 */
         break;
     case 'n':
         ctl_set_night(!rk_theme_is_night());
@@ -972,6 +1148,43 @@ static void qa_apply(void *arg)
         break;
     case 'x':
         radio_pages_close_all();                                    /* 收尾回主屏，便于连续截屏 */
+        break;
+    case 'v':
+        sdgoods_cc_debug_open(3);                                   /* 音量滑块页 */
+        break;
+    case 'g':
+        /* 在音量页上合成一次「按下 → 横拖 → 松开」：用于复现/验收拖动卡顿。
+         * 滑块 240×24 居中 ⇒ y=180、x=60..300；从 120 拖到 228。 */
+        sdgoods_tap_synth(120, 180, 12, 0, 10);
+        break;
+    case 'm':
+        /* 静音开关验收：开页 + 点按钮。
+         * ⚠️ 不能在同一 tick 里紧接着 tap：页面刚创建，子对象 coords 还没算出来
+         *    （LVGL 的 align 要等一次布局刷新），此时命中测试抓不到按钮。
+         *    tap_synth 又必须回到 LVGL 线程 —— 用 150ms 的一次性 lv_timer 中转。
+         * 连发两次 'm' 应看到 `tap: Mute 5% -> 0%` 后 `tap: Mute 0% -> 5%`。 */
+        sdgoods_cc_debug_open(3);
+        if (!lv_timer_create(mute_tap_later, 150, NULL)) {
+            ESP_LOGW("radio-qa", "mute tap timer alloc failed");
+        }
+        break;
+    case 'j':
+        step_play(1);                                               /* 下一台：连切验收缓冲与失败率
+                                                                     * （'s' 被平台串口截屏占了，别用） */
+        break;
+    case 'J':
+        step_play(-1);                                              /* 上一台 */
+        break;
+    case 'y':
+        /* 验收 30x 跟随：antenne.de 的入口 302 到 s4-webradio（200 audio/mpeg），
+         * 旧代码会把 302 当失败，现在应看到 `http 302 -> ...` 后正常出声。 */
+        radio_player_play("http://stream.antenne.de/antenne", "MP3");
+        break;
+    case 'V':
+        /* 把音量恢复成 70% 并落盘（串口测试把滑块拖到 0 后救回来用）。
+         * 必须先 flush：NVS 是跨 app 共用的，不落盘下次启动又会读回 0。 */
+        sdgoods_audio_set_volume(70);
+        sdgoods_cc_flush();
         break;
     default:
         if (c >= '1' && c <= '9') {
