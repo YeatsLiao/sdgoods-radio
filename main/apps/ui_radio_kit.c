@@ -368,9 +368,14 @@ static void ring_draw_cb(lv_event_t *e)
     ad.rounded = 1;
     ad.opa = LV_OPA_COVER;
 
-    /* 轨道：整段 120°→420° */
-    ad.color = th->hair;
-    ad.width = 3;
+    /* 轨道：整段 120°→420°，2px 细线。
+     * 曾经是 3px 轨道 + 4px 进度（从起点一路染红到当前），实测红弧会盖住 77%
+     * 的周长，整屏被一圈亮红抢走焦点，点阵反而变弱。现在红色只留给端点那一颗
+     * 针：已走 muted、未走 hair，靠两种灰的深浅分进度。
+     * 轨道取 hair↔muted 中间：纯 hair 在暗底上对比只有 1.6:1，实拍几乎看不见，
+     * 环就退化成一颗浮在空中的红点，丢了「26 个台围成一圈」的语义。 */
+    ad.color = lv_color_mix(th->muted, th->hair, 110);
+    ad.width = 2;
     lv_draw_arc(dc, &ad, &center, (uint16_t)r->radius, RING_A0, RING_A0 + RING_SWEEP);
 
     if (r->idx < 0 || r->count <= 0) {
@@ -378,13 +383,13 @@ static void ring_draw_cb(lv_event_t *e)
     }
 
     uint16_t end = ring_angle(r->idx, r->count);
-    ad.color = r->dim ? th->muted : th->accent;
-    ad.width = 4;
+    ad.color = r->dim ? th->hair : th->muted;
+    ad.width = 2;
     if (end > RING_A0) {
         lv_draw_arc(dc, &ad, &center, (uint16_t)r->radius, RING_A0, end);
     }
 
-    /* 端点：一个实心圆，读数一眼可见 */
+    /* 端点：一颗实心圆，整屏上唯一的红 */
     lv_point_t p;
     ring_point(center, r->radius, end, &p);
     lv_draw_rect_dsc_t rd;
@@ -397,11 +402,11 @@ static void ring_draw_cb(lv_event_t *e)
     lv_area_t da = {p.x - 5, p.y - 5, p.x + 5, p.y + 5};
     lv_draw_rect(dc, &rd, &da);
 
-    /* 起点小帽：让弧的起始有个「刻度原点」 */
+    /* 起点小帽：让弧的起始有个「刻度原点」，比轨道亮一档但不抢端点 */
     ring_point(center, r->radius, RING_A0, &p);
-    lv_area_t sa = {p.x - 3, p.y - 3, p.x + 3, p.y + 3};
+    lv_area_t sa = {p.x - 2, p.y - 2, p.x + 2, p.y + 2};
     rd.radius = LV_RADIUS_CIRCLE;
-    rd.bg_color = th->muted;
+    rd.bg_color = r->dim ? th->hair : th->muted;
     lv_draw_rect(dc, &rd, &sa);
 }
 
