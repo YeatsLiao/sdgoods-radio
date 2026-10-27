@@ -313,6 +313,18 @@ static lv_obj_t *s_set = NULL;    /* 设置二级页（声音/亮度/数据/电�
 static void (*s_apply)(int) = NULL;
 static lv_obj_t *s_val_label = NULL;
 
+/* 音量页的静音开关（亮度页不建）。静音**不是**一个独立状态：
+ * `sdgoods_audio_set_volume(0)` 本身就是静音（还会顺带关功放、消掉底噪），
+ * 所以这个按钮只做「把滑块拖到 0 / 回到上一次音量」的快捷方式 ——
+ * 滑块位置永远是唯一真相，不会出现「显示 60% 却没声音」这种双份状态。
+ * s_vol_before_mute = 取消静音回到多少；断电后只能靠 NVS 找回来（CC_NVS_KEY_VOL_PRE），
+ * 否则「静音 → 关机 → 开机」之后它就只剩出厂默认值了。 */
+static lv_obj_t *s_slider_bar = NULL;
+static lv_obj_t *s_mute_btn   = NULL;
+static lv_obj_t *s_mute_lbl   = NULL;
+static int       s_mute_ui_state = -1;   /* 按钮当前展示的状态缓存（1=静音），只在翻转时改 UI */
+static int       s_vol_before_mute = 70;
+
 /* 前向声明：二级页从底部小横条上滑直接返回主页时调用 */
 void sdgoods_cc_close(void);
 
@@ -330,6 +342,10 @@ void sdgoods_cc_close(void);
  *    这正是用户报的 bug（第一次进设置页正常、第二次起全错）。
  *    修法与图标池 s_cc_icon_base 同构：每页从自己的页基线重新分配，绝不复用旧槽。 */
 #define CC_BTN_MAX 12
+/* 音量页「静音开关」专用的点按槽：滑块页与一级页是**覆盖**关系（一级页还活着），
+ * 所以它不能用 s_btn_ctx_n 顺序分配 —— 那会与一级页已绑定的 Volume 槽撞车，
+ * 回控制中心后点 Volume 反而触发静音。固定占最后一格，且同一时刻只有一个静音按钮。 */
+#define CC_MUTE_SLOT (CC_BTN_MAX - 1)
 static sdgoods_tap_ctx_t s_btn_ctx[CC_BTN_MAX];
 static int               s_btn_ctx_n  = 0;
 static int               s_btn_ctx_base = 0;   /* 本页在池中的起始槽（open_cc 置 0） */
@@ -417,8 +433,10 @@ static void make_bottom_hint(lv_obj_t *parent)
 /* ---- 音量 / 亮度掉电保存（NVS） ------------------------------------------ */
 
 #define CC_NVS_NS      "sdg_cc"
-#define CC_NVS_KEY_VOL "vol"
-#define CC_NVS_KEY_BRI "bri"
+#define CC_NVS_KEY_VOL     "vol"
+#define CC_NVS_KEY_BRI     "bri"
+/* 静音前的音量：vol 被静音写成 0 之后，「取消静音回到多少」只剩这一格记得。 */
+#define CC_NVS_KEY_VOL_PRE "volunmute"
 
 /* 亮度**用户意图值**（0~100）：落盘存的是它，不是背光 PWM 的瞬时值。
  *
@@ -461,7 +479,14 @@ static void cc_settings_save(void)
         ESP_LOGW(TAG, "nvs_open save failed");
         return;
     }
-    nvs_set_u8(h, CC_NVS_KEY_VOL, (uint8_t)sdgoods_audio_get_volume());
+    const int vol_now = sdgoods_audio_get_volume();
+    nvs_set_u8(h, CC_NVS_KEY_VOL, (uint8_t)vol_now);
+    /* 只在非 0 时写：它必须永远等于「最后一次听得见的音量」。
+     * 若在静音时也写 0，「取消静音」就只能回到出厂默认，用户刚调好的值白调。 */
+    if (vol_now > 0) {
+        s_vol_before_mute = vol_now;
+        nvs_set_u8(h, CC_NVS_KEY_VOL_PRE, (uint8_t)vol_now);
+    }
     /* ⚠️ 存 s_bri_user（用户意图值）而不是 sdgoods_lcd_get_backlight()（瞬时值）——
      *    后者在开机动画 / 息屏 / 关机前都是 0，会把「临时熄灭」当成用户偏好写进 NVS
      *    ⇒ 下次开机 restore 成 0 ⇒ **黑屏**。详见 s_bri_user / CC_BRI_PERSIST_MIN。
@@ -489,40 +514,48 @@ static void cc_settings_save(void)
         snprintf(bri_txt, sizeof(bri_txt), "unchanged (live %d < floor %d, skipped)",
                  (int)s_bri_user, CC_BRI_PERSIST_MIN);
     }
-    ESP_LOGI(TAG, "save: vol=%d%% bri=%s%s -> NVS ns='%s'",
-             sdgoods_audio_get_volume(), bri_txt,
+    ESP_LOGI(TAG, "save: vol=%d%%%s bri=%s%s -> NVS ns='%s'",
+             vol_now, vol_now == 0 ? " (muted)" : "", bri_txt,
              sdgoods_power_is_suspended() ? " (screen suspended!)" : "", CC_NVS_NS);
 }
 
 /* 防抖定时器：滑块拖动会高频触发 VALUE_CHANGED，不能每次都写 NVS（磨损 flash）。
- * 停止调节 800ms 后才真正落盘一次。 */
+ * 停止调节 800ms 后才真正落盘一次。
+ *
+ * ⚠️ 这个定时器**只创建一次**，之后靠 pause/reset 复用 —— 旧版每次 arm 都
+ *    lv_timer_del + lv_timer_create，拖动音量时等于每几毫秒 malloc/free 一个定时器
+ *    并重排定时器链表，在圆屏上就是能看见的卡顿。 */
 static lv_timer_t *s_save_timer = NULL;
+static int         s_save_pending = -1;   /* 待落盘的滑块值（落盘日志用） */
 
 static void save_timer_cb(lv_timer_t *t)
 {
-    s_save_timer = NULL;
     cc_settings_save();
-    /* 一次性：本回调执行完就停掉这个定时器。
+    if (s_save_pending >= 0) {
+        ESP_LOGI(TAG, "slider[%s] persisted -> %d%%", s_slider_title, s_save_pending);
+        s_save_pending = -1;
+    }
+    /* 暂停而非删除：下一次 arm 用 lv_timer_reset() 重新计时即可。
      *
-     * ⚠️ 必须设 **0**，不能设 1（旧版设 1，注释还写着「执行完即自动删除」，是错的）。
-     *    `lv_timer_create()` 给的初值是 **-1（无限）**，而 lv_timer_exec 的顺序是
-     *      original = repeat_count;  if (repeat_count > 0) repeat_count--;
-     *      cb();                     if (repeat_count == 0) lv_timer_del();
-     *    设 1 ⇒ 本次执行完 repeat_count=1 ≠ 0 ⇒ **不删**；800ms 后再来一次（先减到 0，
+     * ⚠️ 别改回 lv_timer_set_repeat_count(t, 1)：`lv_timer_create()` 给的初值是
+     *    **-1（无限）**，而 lv_timer_exec 的顺序是「先减、再回调、最后判 0 删除」。
+     *    设 1 ⇒ 本次执行完 repeat_count=1 不为 0 ⇒ 不删，800ms 后再来一次（先减到 0，
      *    回调里又被设回 1）⇒ 永久循环。
-     * 真机症状：`cc: save:` 每 800ms 连刷（实测一轮出现 23 行）—— 等于每 800ms 写一次
-     *    NVS，永不停歇（磨损 flash，也让日志里的「谁写的→谁读的」链条淹没在噪声里）。
-     * 设 0 ⇒ 第 320 行 `repeat_count == 0` 成立 ⇒ 本轮回调结束后被删除。
-     * （源码：components/lvgl/src/misc/lv_timer.c:300-327） */
-    lv_timer_set_repeat_count(t, 0);
+     *    真机症状：`cc: save:` 每 800ms 连刷（实测一轮 23 行）—— 等于每 800ms 写一次
+     *    NVS，永不停歇。设 0 才会在回调结束后被删除（旧版做法）。
+     *    （源码：components/lvgl/src/misc/lv_timer.c:300-327） */
+    lv_timer_pause(t);
 }
 
 static void save_timer_arm(void)
 {
-    if (s_save_timer) {
-        lv_timer_del(s_save_timer);
+    if (!s_save_timer) {
+        s_save_timer = lv_timer_create(save_timer_cb, 800, NULL);
+        if (!s_save_timer) {
+            return;
+        }
     }
-    s_save_timer = lv_timer_create(save_timer_cb, 800, NULL);
+    lv_timer_reset(s_save_timer);   /* 内部已含 resume */
 }
 
 /* 强制立即落盘（进 app / 关机前调用，因为之后会立即重启断电）：
@@ -554,11 +587,15 @@ void sdgoods_cc_settings_restore(void)
                  sdgoods_audio_get_volume(), (int)s_bri_user);
         return;   /* 首次开机尚无记录 */
     }
-    uint8_t vol = 0, bri = 0;
+    uint8_t vol = 0, bri = 0, vol_pre = 0;
     const bool has_vol = (nvs_get_u8(h, CC_NVS_KEY_VOL, &vol) == ESP_OK);
     const bool has_bri = (nvs_get_u8(h, CC_NVS_KEY_BRI, &bri) == ESP_OK);
+    const bool has_pre = (nvs_get_u8(h, CC_NVS_KEY_VOL_PRE, &vol_pre) == ESP_OK);
     nvs_close(h);
 
+    if (has_pre && vol_pre > 0 && vol_pre <= 100) {
+        s_vol_before_mute = vol_pre;   /* 上次听得见的音量：静音开机时「取消静音」要用 */
+    }
     if (has_vol) {
         sdgoods_audio_set_volume(vol);
     }
@@ -576,9 +613,9 @@ void sdgoods_cc_settings_restore(void)
             sdgoods_lcd_set_backlight(s_bri_user);
         }
     }
-    ESP_LOGI(TAG, "restore: vol=%d%%%s bri=%d%s (from NVS ns='%s')",
+    ESP_LOGI(TAG, "restore: vol=%d%%%s bri=%d%s unmute=%d (from NVS ns='%s')",
              sdgoods_audio_get_volume(), has_vol ? "" : "(no record)",
-             (int)s_bri_user, has_bri ? "" : "(no record)", CC_NVS_NS);
+             (int)s_bri_user, has_bri ? "" : "(no record)", s_vol_before_mute, CC_NVS_NS);
 }
 
 /* 「用户设定的亮度」的公开访问点 —— 给**启动流程**用（sdgoods_boot.c）。
@@ -601,37 +638,103 @@ uint8_t sdgoods_cc_brightness_get(void)
 
 /* ---- 二级滑块页 ----------------------------------------------------------- */
 
+/* 按**实际音量**刷新静音按钮：0 ⇒ 白底「Unmute」，非 0 ⇒ 深灰「Mute」。
+ * 拖动滑块也会走到这里（拖到 0 等价于静音），所以它必须便宜：状态没变直接返回。 */
+static void mute_ui_refresh(void)
+{
+    if (!s_mute_btn || !s_mute_lbl) {
+        return;
+    }
+    const int st = (sdgoods_audio_get_volume() == 0) ? 1 : 0;
+    if (st == s_mute_ui_state) {
+        return;
+    }
+    s_mute_ui_state = st;
+    lv_obj_set_style_bg_color(s_mute_btn, st ? lv_color_white() : lv_color_hex(0x2C2C2E), 0);
+    lv_obj_set_style_text_color(s_mute_lbl, st ? lv_color_black() : lv_color_white(), 0);
+    lv_label_set_text(s_mute_lbl, st ? "Unmute" : "Mute");
+}
+
+/* 静音开关：不是把某个 bool 翻过来，而是把音量在「0 ／ 上次听得见的音量」间换。
+ * 这样它和滑块共用同一个真值（sdgoods_audio_get_volume()），也顺带继承了
+ * sdgoods_audio_set_volume(0) 的「关功放消除底噪」行为。 */
+static void tap_mute(void *ud)
+{
+    (void)ud;
+    const int cur = sdgoods_audio_get_volume();
+    int target;
+    if (cur > 0) {
+        s_vol_before_mute = cur;
+        target = 0;
+    } else {
+        target = (s_vol_before_mute > 0) ? s_vol_before_mute : 70;
+    }
+    ESP_LOGI(TAG, "tap: Mute %d%% -> %d%%", cur, target);
+    if (s_apply) {
+        s_apply(target);
+    }
+    /* 滑块与数值标签跟上：屏幕上只有一个真值，不搞「静音了但还显示 60%」。
+     * ANIM_OFF：动画的每一帧都会再触发 VALUE_CHANGED（→ s_apply + 重置落盘防抖），
+     * 对「一键跳值」只会添乱。 */
+    if (s_slider_bar) {
+        lv_slider_set_value(s_slider_bar, target, LV_ANIM_OFF);
+    }
+    if (s_val_label) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d%%", target);
+        lv_label_set_text(s_val_label, buf);
+    }
+    mute_ui_refresh();
+    s_save_pending = target;
+    save_timer_arm();   /* 与拖动同一条落盘路径 */
+}
+
 static void slider_event_cb(lv_event_t *e)
 {
     int v = lv_slider_get_value(lv_event_get_target(e));
     char buf[16];
     snprintf(buf, sizeof(buf), "%d%%", v);
     lv_label_set_text(s_val_label, buf);
-    /* 日志：既便于串口离线核验「拖动真的改到了滑块」，也是「拖动被返回手势抢走」
-     * 这类问题的判定依据（拖动却没这行 ⇒ 手势根本没到滑块手里）。 */
-    ESP_LOGI(TAG, "slider[%s] value -> %d%%", s_slider_title, v);
+    /* ⚠️ 不要在这里打 ESP_LOGI：拖动时一秒几十次，115200 串口上一行 ≈ 4ms 阻塞，
+     * 直接把 LVGL 任务拖到能看见的卡顿。改动只跑到 save_timer_arm()，
+     * 值由落盘回调打一行（见 save_timer_cb），同样能离线核验「拖动真的改到了滑块」。 */
     if (s_apply) {
         s_apply(v);
     }
+    mute_ui_refresh();   /* 拖到 0 就是静音，按钮文案跟着翻 */
+    s_save_pending = v;
     save_timer_arm();   /* 防抖落盘 */
+}
+
+/* 删掉滑块页，并把指针一起清空。
+ * ⚠ 必须清指针：s_slider_bar / s_val_label / s_mute_* 都是页内子对象，页一删就是悬空指针，
+ *    下一次 slider_event_cb 或 mute_ui_refresh 会直接访问已释放内存。
+ *    点按槽不用回收：静音按钮固定占 CC_MUTE_SLOT，不参与 s_btn_ctx_n 的页基线分配。 */
+static void slider_free(void)
+{
+    if (!s_slider) {
+        return;
+    }
+    lv_obj_del(s_slider);
+    s_slider = NULL;
+    s_slider_bar = NULL;
+    s_mute_btn = NULL;
+    s_mute_lbl = NULL;
+    s_val_label = NULL;
+    s_mute_ui_state = -1;
 }
 
 static void slider_back(void)
 {
-    if (s_slider) {
-        lv_obj_del(s_slider);
-        s_slider = NULL;
-    }
+    slider_free();
 }
 
 /* min = 滑块可拖到的**最小值**（含）：音量传 0（静音是有效值），亮度传 CC_BRI_MIN（1，
- * 见 CC_BRI_MIN 的说明 —— 拖到 0 会存成「用户偏好 0」⇒ 下次开机黑屏且屏上无法自救）。 */
-static void open_slider(const char *title, int min, int init, void (*apply)(int))
+ * 见 CC_BRI_MIN 的说明 —— 拖到 0 会存成「用户偏好 0」⇒ 下次开机黑屏且屏上无法自救）。
+ * with_mute = 是否在滑块下方放静音开关：只有音量页要（亮度没有「静音」这个概念）。 */
+static void open_slider(const char *title, int min, int init, void (*apply)(int), bool with_mute)
 {
-    if (s_slider) {
-        lv_obj_del(s_slider);
-        s_slider = NULL;
-    }
+    slider_free();
     s_apply = apply;
     s_slider_title = title ? title : "?";
     /* 打开时的**实时值**（亮度页传的是 sdgoods_lcd_get_backlight()）。
@@ -682,6 +785,28 @@ static void open_slider(const char *title, int min, int init, void (*apply)(int)
     lv_slider_set_range(sl, min, 100);
     lv_slider_set_value(sl, init < min ? min : init, LV_ANIM_OFF);
     lv_obj_add_event_cb(sl, slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    s_slider_bar = sl;
+
+    if (with_mute) {
+        /* 静音开关：滑块正下方 y≈252（该处圆内可用宽 ≈331px，132 宽绰绰有余）。
+         * 文字用英文：si_yuan_black_icon_* 是图标字体，不含中文字形。 */
+        s_mute_btn = lv_obj_create(s_slider);
+        lv_obj_set_size(s_mute_btn, 132, 44);
+        lv_obj_align(s_mute_btn, LV_ALIGN_CENTER, 0, 72);
+        lv_obj_set_style_radius(s_mute_btn, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(s_mute_btn, 0, 0);
+        lv_obj_set_style_shadow_width(s_mute_btn, 0, 0);
+        lv_obj_set_style_pad_all(s_mute_btn, 0, 0);
+        lv_obj_clear_flag(s_mute_btn, LV_OBJ_FLAG_SCROLLABLE);
+
+        s_mute_lbl = lv_label_create(s_mute_btn);
+        lv_obj_set_style_text_font(s_mute_lbl, &si_yuan_black_icon_16, 0);
+        lv_obj_center(s_mute_lbl);
+
+        s_mute_ui_state = -1;   /* 强制下面这次刷新生效 */
+        mute_ui_refresh();
+        sdgoods_tap_bind(s_mute_btn, &s_btn_ctx[CC_MUTE_SLOT], tap_mute, NULL);
+    }
 
     /* 底部小横条：提示「从底部往上滑返回主页」 */
     make_bottom_hint(s_slider);
@@ -733,13 +858,13 @@ static void apply_backlight(int v)
 static void open_vol_async(void *p)
 {
     (void)p;
-    open_slider("Volume", 0, sdgoods_audio_get_volume(), sdgoods_audio_set_volume);
+    open_slider("Volume", 0, sdgoods_audio_get_volume(), sdgoods_audio_set_volume, true);
 }
 
 static void open_bri_async(void *p)
 {
     (void)p;
-    open_slider("Brightness", CC_BRI_MIN, sdgoods_lcd_get_backlight(), apply_backlight);
+    open_slider("Brightness", CC_BRI_MIN, sdgoods_lcd_get_backlight(), apply_backlight, false);
 }
 
 static void pwr_off_async(void *p)
@@ -1138,7 +1263,7 @@ static void debug_open_slider_async(void *p)
     (void)p;
     sdgoods_cc_close();
     sdgoods_cc_open();
-    open_slider("Volume", 0, sdgoods_audio_get_volume(), sdgoods_audio_set_volume);
+    open_slider("Volume", 0, sdgoods_audio_get_volume(), sdgoods_audio_set_volume, true);
 }
 
 /* which=4：**亮度**滑块页（2026-09-19 新增）。
@@ -1150,7 +1275,7 @@ static void debug_open_bri_async(void *p)
     (void)p;
     sdgoods_cc_close();
     sdgoods_cc_open();
-    open_slider("Brightness", CC_BRI_MIN, sdgoods_lcd_get_backlight(), apply_backlight);
+    open_slider("Brightness", CC_BRI_MIN, sdgoods_lcd_get_backlight(), apply_backlight, false);
 }
 
 void sdgoods_cc_debug_open(int which)
@@ -1292,8 +1417,7 @@ void sdgoods_cc_close(void)
         s_data = NULL;
     }
     if (s_slider) {
-        lv_obj_del(s_slider);
-        s_slider = NULL;
+        slider_free();
     }
     if (s_about) {
         lv_obj_del(s_about);
