@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp：HTTP 头名大小写不敏感 */
 #include <stdlib.h>
 #include <math.h>
 
@@ -37,13 +38,20 @@ static const char *TAG = "radio_player";
 #define RP_READ_CHUNK   4096             /* 生产者单次 http read 字节 */
 #define RP_NET_STACK     8192            /* 生产者任务栈（http + tmp 读缓冲） */
 #define RP_NET_PRIO        5             /* 生产者优先级：低于消费者(6)，同钉 core 1；消费者阻塞在 i2s 写时它灌缓冲 */
-#define RP_PREBUFFER   16384             /* 开播前环形缓冲至少攒这么多（~1s@128k），给网络抖动留垫 */
+#define RP_PREBUFFER    8192             /* 开播前环形缓冲至少攒这么多（~0.5s@128k）：出声更快；
+                                          * 后面还有 64KB 环垫底，起播早不会因此 underrun */
 #define RP_PREBUFFER_MAX_MS 3000         /* 预缓冲最长等待：慢台/涓流台超时后带已有数据直接开播，防无限“缓冲中” */
 #define RP_OUT_CAP       8192            /* 单帧解码输出上限（MP3 立体 ~4.6KB） */
 #define RP_PROBE_BYTES  16384            /* 缓冲这么多字节仍解不出 -> 判编码不符 */
 #define RP_MAX_RETRY     2               /* 同一台断连重连次数，超出置 ERROR 换下一台（死台快跳） */
-#define RP_HTTP_TIMEOUT  6000            /* http 读超时 ms：连上但不回数据的死台更快判死 */
-#define RP_FIRST_FRAME_MAX_MS 12000      /* 进 BUFFERING 后这么久还没解出第一帧 -> 判死台
+#define RP_HTTP_CONNECT_TIMEOUT 5000     /* 建连 / TLS 握手 / 等响应头：跨境 CDN 要给足，
+                                          * 压到 3s 会把慢台误判成死台 */
+#define RP_HTTP_READ_TIMEOUT    2500     /* 连上之后单次 read 超时：死台更快让位。
+                                          * 切台时消费者要等旧 read 返回，这段就是最坏白等时长 */
+#define RP_NET_IDLE_MAX_MS 15000         /* 连续这么久一个字节都没读到才判死流：
+                                          * 电台切歌/服务器缓冲常有几秒空隙，不能当断流 */
+#define RP_MAX_REDIRECT   3              /* 30x 最多跟几跳（CDN 常见 1~2 跳） */
+#define RP_FIRST_FRAME_MAX_MS 6000       /* 进 BUFFERING 后这么久还没解出第一帧 -> 判死台
                                           * （涓流数据 / 只发头不发体的流会让 probe 永远
                                           *  涨不到阈值，UI 就卡在“缓冲中”很久） */
 #define RP_URL_CAP       256
@@ -222,38 +230,108 @@ static void rp_task_exit(void)
     vTaskDeleteWithCaps(NULL);
 }
 
+/* 302 的 Location 只能从事件回调里拿：`esp_http_client_get_header()` 读的是
+ * **请求**头（client->request->headers），响应头不在那里。只有一个生产者任务，
+ * 回调又是同步派发的，所以用静态缓冲足够安全。 */
+static char s_redirect_loc[RP_URL_CAP];
+
+static esp_err_t rp_http_event(esp_http_client_event_t *evt)
+{
+    if (evt->event_id == HTTP_EVENT_ON_HEADER && evt->header_key && evt->header_value &&
+        strcasecmp(evt->header_key, "Location") == 0) {
+        strlcpy(s_redirect_loc, evt->header_value, sizeof(s_redirect_loc));
+    }
+    return ESP_OK;
+}
+
+/* 把服务端给的 Location 转成绝对 URL：CDN 通常直接给绝对地址，
+ * 少数给 "/path"，此时沿用当前 URL 的 scheme://host。 */
+static void rp_abs_url(const char *base, const char *loc, char *out, size_t cap)
+{
+    if (strncmp(loc, "http://", 7) == 0 || strncmp(loc, "https://", 8) == 0) {
+        strlcpy(out, loc, cap);
+        return;
+    }
+    const char *p = strstr(base, "://");
+    const char *slash = p ? strchr(p + 3, '/') : NULL;
+    size_t host_len = slash ? (size_t)(slash - base) : strlen(base);
+    if (host_len >= cap) {
+        host_len = cap - 1;
+    }
+    memcpy(out, base, host_len);
+    out[host_len] = '\0';
+    strlcat(out, loc, cap);
+}
+
 static void rp_net_task(void *arg)
 {
     (void)arg;
     uint32_t sess = s_net_seq;
     s_net_reason = RP_END_HTTP_FAIL;
 
+    /* ★ 必须自己跟 30x：`esp_http_client_set_redirection()` 只对阻塞式
+     *   esp_http_client_perform() 生效（其源码里 process_again 明确标注
+     *   "used only in the blocking mode"）。本函数走的是 open/fetch/read 手动
+     *   路径，IDF 的自动重定向逻辑（esp_http_check_response）根本不参与 ⇒
+     *   凡是被 CDN 302 到真实流地址的电台每次都会失败，表现为“切台有概率失败”。 */
+    char cur[RP_URL_CAP];
+    strlcpy(cur, s_net_url, sizeof(cur));
+
     esp_http_client_config_t hcfg = {
-        .url = s_net_url,
+        .url = cur,
         .method = HTTP_METHOD_GET,
-        .timeout_ms = RP_HTTP_TIMEOUT,
+        .timeout_ms = RP_HTTP_CONNECT_TIMEOUT,
         .buffer_size = RP_READ_CHUNK,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .keep_alive_enable = false,
+        .event_handler = rp_http_event,
     };
     esp_http_client_handle_t http = esp_http_client_init(&hcfg);
     if (!http) { s_net_eof = true; s_net_alive = false; rp_task_exit(); return; }
     esp_http_client_set_header(http, "User-Agent", "SDGOODS-Radio/1.0");
     esp_http_client_set_header(http, "Icy-MetaData", "0");
 
-    if (esp_http_client_open(http, 0) != ESP_OK) {
-        ESP_LOGW(TAG, "http open failed: %s", s_net_url);
-        esp_http_client_cleanup(http);
-        s_net_eof = true; s_net_alive = false; rp_task_exit(); return;
+    int status = 0;
+    bool opened = false;
+    for (int hop = 0; hop <= RP_MAX_REDIRECT; hop++) {
+        s_redirect_loc[0] = '\0';   /* 每次请求前清掉上一跳的 Location */
+        if (esp_http_client_open(http, 0) != ESP_OK) {
+            ESP_LOGW(TAG, "http open failed: %s", cur);
+            break;
+        }
+        opened = true;
+        esp_http_client_fetch_headers(http);
+        status = esp_http_client_get_status_code(http);
+        if (status / 100 != 3 || s_redirect_loc[0] == '\0') {
+            break;
+        }
+        if (hop >= RP_MAX_REDIRECT) {
+            ESP_LOGW(TAG, "too many redirects, stop at %s", cur);
+            break;
+        }
+        char next[RP_URL_CAP];
+        rp_abs_url(cur, s_redirect_loc, next, sizeof(next));
+        /* 先断开再换地址：open() 只接受 INIT 状态的 client */
+        esp_http_client_close(http);
+        esp_http_client_reset_redirect_counter(http);   /* 跳数自己数，库里的计数器只服务阻塞模式 */
+        if (esp_http_client_set_url(http, next) != ESP_OK) {
+            opened = false;
+            break;
+        }
+        strlcpy(cur, next, sizeof(cur));
+        ESP_LOGI(TAG, "http %d -> %s", status, cur);
     }
-    esp_http_client_fetch_headers(http);
-    int status = esp_http_client_get_status_code(http);
-    if (status / 100 != 2) {
-        ESP_LOGW(TAG, "http status %d for %s", status, s_net_url);
+
+    if (!opened || status / 100 != 2) {
+        if (opened) {
+            ESP_LOGW(TAG, "http status %d for %s", status, cur);
+        }
         esp_http_client_close(http);
         esp_http_client_cleanup(http);
         s_net_eof = true; s_net_alive = false; rp_task_exit(); return;
     }
+    /* 建连阶段用的是宽容超时；开始拉流后换成短超时，死台/切台少白等 */
+    esp_http_client_set_timeout_ms(http, RP_HTTP_READ_TIMEOUT);
     s_net_reason = RP_END_DISCONNECT;   /* 之后若因读<=0 结束，按断流计 */
     ESP_LOGI(TAG, "net: connected, streaming");
 
@@ -264,9 +342,25 @@ static void rp_net_task(void *arg)
         tmp = stackbuf;
         rchunk = (int)sizeof(stackbuf);
     }
+    /* ★ 读超时不是断流：`esp_http_client_read()` 在 socket 等不到完整数据时返回
+     *   -ESP_ERR_HTTP_EAGAIN（底层 transport_ssl 打的那行
+     *   `esp_tls_conn_read error, errno=No more processes` 就是它：poll 说可读，
+     *   但 TLS 记录只到了一半，mbedtls 返回 WANT_READ）。
+     *   旧代码 `r <= 0` 一律 break，于是切歌/网络抖动几秒就整条流重连一次，
+     *   表现为“长时间播放后偶发断一次”。这里只累计空闲时间。 */
+    int idle_ms = 0;
     while (s_seq == sess && !s_net_stop) {
         int r = esp_http_client_read(http, (char *)tmp, rchunk);
-        if (r <= 0) break;
+        if (r == -ESP_ERR_HTTP_EAGAIN) {
+            idle_ms += RP_HTTP_READ_TIMEOUT;
+            if (idle_ms >= RP_NET_IDLE_MAX_MS) {
+                ESP_LOGW(TAG, "no data for %dms, closing stream", idle_ms);
+                break;
+            }
+            continue;
+        }
+        if (r <= 0) break;              /* 真断流 / 服务端 FIN */
+        idle_ms = 0;
         uint32_t off = 0;
         while (off < (uint32_t)r && s_seq == sess && !s_net_stop) {
             uint32_t w = ring_write(tmp + off, (uint32_t)r - off);
