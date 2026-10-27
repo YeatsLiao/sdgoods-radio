@@ -77,6 +77,7 @@ static volatile int s_flap_rem;     /* 拍翅音效剩余采样数（>0 时混�
 static float        s_flap_ph;      /* 拍翅音效相位累加器 */
 static bool         s_spk_inited;   /* 扬声器硬件（PA GPIO + I2S 通道）是否已初始化 */
 static volatile int s_vol_pct = 10; /* 全局音量（0~100，默认 10%）；volatile：UI 线程改、BGM 任务读，防止编译器提升出循环 */
+static bool         s_pa_on;        /* 功放使能脚当前电平（供日志判断状态是否真的翻转） */
 
 /* 三套 8-bit 风格旋律；lead = 主旋律，bass = 低音伴奏 */
 static const float g_flappy_lead_f[BGM_NOTES] = {
@@ -124,14 +125,21 @@ static void pa_set(bool on)
 {
     const int want = on ? BOARD_AUDIO_PA_EN_ACTIVE_LEVEL : (1 - BOARD_AUDIO_PA_EN_ACTIVE_LEVEL);
     gpio_set_level(BOARD_AUDIO_PA_EN_GPIO, want);
+    s_pa_on = on;
 }
 
-/* 功放使能策略：仅当「BGM 正在播放」且「音量 > 0」时才开功放；
- * 否则关功放。这样「声音关了（vol=0）但 BGM 仍在跑」时不会把
- * DAC/I2S 的静音底噪放大出来（用户反馈：静音后仍有杂音）。 */
+/* 功放使能策略：声音出口正在输出（BGM 或电台直播流）且音量 > 0 时才开功放；
+ * 否则关功放。这样「声音关了（vol=0）但仍有输出」时不会把 DAC/I2S 的
+ * 静音底噪放大出来（用户反馈：静音后仍有杂音）。
+ *
+ * ⚠️ 这里必须把 s_stream_active 也算进「正在输出」：
+ *   sdgoods_audio_stream_start() 会先调 bgm_stop()（两者共用 s_tx，互斥），
+ *   于是电台播放期间 s_bgm_run **恒为 false**。若只看 s_bgm_run，用户每拖一下
+ *   音量滑块就会走到 pa_set(false) ⇒ 功放被关掉且再没人打开 ⇒ 电台彻底静音
+ *   （真机症状：切一次音量声音就没了，像卡死）。 */
 static void pa_apply(void)
 {
-    pa_set(s_bgm_run && s_vol_pct > 0);
+    pa_set((s_bgm_run || s_stream_active) && s_vol_pct > 0);
 }
 
 static inline int16_t sat16(int32_t s)
@@ -647,9 +655,17 @@ void sdgoods_audio_set_volume(int pct)
     if (pct > 100) {
         pct = 100;
     }
+    const bool pa_before = s_pa_on;
     s_vol_pct = pct;
     pa_apply();   /* 音量归零立刻关功放，消除静音底噪；调大再开功放 */
-    ESP_LOGI("audio", "volume=%d%% -> PA %s", pct, (s_bgm_run && pct > 0) ? "ON" : "OFF");
+    /* 拖动滑块时本函数每几毫秒就被调一次；115200 波特率下一行日志 ≈ 4ms 阻塞，
+     * 每事件都打会让 LVGL 任务明显掉帧（用户反馈「一切换音量就卡」）。
+     * 只在功放状态真正翻转时打一行，中间的连续值降到 DEBUG。 */
+    if (s_pa_on != pa_before) {
+        ESP_LOGI("audio", "volume=%d%% -> PA %s", pct, s_pa_on ? "ON" : "OFF");
+    } else {
+        ESP_LOGD("audio", "volume=%d%%", pct);
+    }
 }
 
 int sdgoods_audio_get_volume(void)
