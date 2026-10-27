@@ -8,6 +8,7 @@
 
 #include "ui_radio_pages.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -16,6 +17,7 @@
 #include "freertos/task.h"
 
 #include "radio_catalog.h"
+#include "sdgoods_lcd.h"
 #include "ui_radio_kit.h"
 #include "wifi_prov.h"
 
@@ -38,9 +40,10 @@ static sdgoods_tap_ctx_t s_set_ctx[8];
 static sdgoods_tap_ctx_t s_pick_ctx[20];
 static sdgoods_tap_ctx_t s_wifi_ctx[WIFI_MAX_NETS];
 static sdgoods_tap_ctx_t s_head_ctx[4];
-static sdgoods_tap_ctx_t s_pw_ctx[2];
+static sdgoods_tap_ctx_t s_pw_ctx[1];
 
 static lv_obj_t *s_pw_ta;
+static lv_obj_t *s_pw_kb;    /* 圆屏软键盘容器（定义在下方键盘小节，detach 时要置空） */
 static char      s_pw_ssid[33];
 
 /* WiFi 扫描交接（任务 → tick） */
@@ -56,6 +59,7 @@ static void (*s_pick_cb)(int idx);
 
 static void radio_pages_open_wifi(lv_obj_t *parent);
 static void radio_pages_open_wifi_pw(lv_obj_t *parent);
+static void pw_kb_build(void);
 
 void radio_pages_init(const radio_pages_ctl_t *ctl)
 {
@@ -66,6 +70,8 @@ void radio_pages_detach(void)
 {
     rk_page_close(&s_pick);
     rk_page_close(&s_wifi_pw);
+    s_pw_ta = NULL;
+    s_pw_kb = NULL;      /* 随页面一起被销毁；不置空则换页的 lv_async_call 会踩野指针 */
     rk_page_close(&s_wifi);
     rk_page_close(&s_set);
     rk_page_close(&s_list);
@@ -406,13 +412,185 @@ static void wifi_connect_cb(void *ud)
     radio_pages_detach();
 }
 
-static void wifi_pw_back_cb(void *ud)
+/* ================================================================== 圆屏软键盘
+ *
+ * 为什么不用 lv_keyboard：它是矩形栅格，会铺满整个控件宽度。屏幕是 360 圆，
+ * 底部几行的左右两端落在圆外 —— 那些键看得见摸不到（用户反馈「按键按不到」），
+ * 键盘底边的字母还会被圆弧切掉一半（「字体超出圆屏」）。
+ *
+ * 这里的做法：行数固定 4 行，**每行的可用宽度按该行底边的弦宽算**，
+ * 行内按键均分并水平居中 —— 越往下行越窄，键盘自然形成一个梯形，整体落在圆内。
+ *
+ *   弦宽公式（圆心 180,180，半径 180）：w(y) = 2·√(180² - (y-180)²)
+ *   行底 y=202 → 359px；y=239 → 340；y=276 → 304；y=313 → 242
+ */
+#define PW_CY        180     /* 圆心 y（x 方向靠居中对称，不需要 cx） */
+#define PW_R         180
+#define PW_EDGE      10      /* 距圆边留白：弧线处触摸端点抖动大，贴边容易按空 */
+#define PW_ROW_Y     168     /* 第一行顶边 */
+#define PW_ROW_H     34
+#define PW_ROW_GAP   3
+#define PW_KEY_GAP   3
+#define PW_ROWS      3       /* 字母/数字共 3 行，底行单独排（空格 + 连接） */
+#define PW_KEY_MAX   40
+
+/* 特殊键码：控制字符当按键用，避免与 WiFi 5~63 位可打印 ASCII 密码冲突 */
+#define PW_K_SYM     0x01    /* 切到数字/符号页 */
+#define PW_K_DEL     0x02    /* 退格 */
+#define PW_K_ABC     0x03    /* 切回字母页 */
+
+static const char *const PW_ROWS_ABC[PW_ROWS] = {
+    "qwertyuiop",
+    "asdfghjkl",
+    "\x01zxcvbnm\x02",
+};
+static const char *const PW_ROWS_NUM[PW_ROWS] = {
+    "1234567890",
+    "-_.,:;@#!?",
+    "\x03()/+*=&%\x02",
+};
+
+static int                s_pw_mode;  /* 0 = 字母，1 = 数字/符号 */
+static char               s_kb_ch[PW_KEY_MAX];
+static sdgoods_tap_ctx_t  s_kb_ctx[PW_KEY_MAX];
+
+/* 该行底边处的可用宽度（圆内），再扣掉两侧留白 */
+static lv_coord_t pw_row_w(lv_coord_t y_top, lv_coord_t h)
 {
-    (void)ud;
-    rk_page_close(&s_wifi_pw);
-    if (rk_page_is_open(&s_wifi)) {
-        lv_obj_clear_flag(s_wifi.root, LV_OBJ_FLAG_HIDDEN);
+    int dy = (int)(y_top + h) - PW_CY;   /* 行底离圆心更远 ⇒ 更窄，取它当约束 */
+    if (dy < 0) {
+        dy = -dy;
     }
+    if (dy >= PW_R) {
+        return 0;
+    }
+    float half = sqrtf((float)(PW_R * PW_R - dy * dy)) - (float)PW_EDGE;
+    if (half < 60.0f) {
+        half = 60.0f;                    /* 兜底：极端情况下也不至于算出负宽 */
+    }
+    return (lv_coord_t)(half * 2.0f);
+}
+
+static void pw_switch_page(void *p)
+{
+    s_pw_mode = (int)(intptr_t)p;
+    pw_kb_build();
+}
+
+static void pw_key_any(void *ud)
+{
+    if (!s_pw_ta) {
+        return;
+    }
+    int idx = (int)(intptr_t)ud;
+    if (idx < 0 || idx >= PW_KEY_MAX) {
+        return;
+    }
+    char c = s_kb_ch[idx];
+    switch (c) {
+    case PW_K_SYM:
+    case PW_K_ABC:
+        /* 换页会重建整块键盘（= 删掉正在处理本事件的按键），必须推迟到
+         * 事件派发结束后再做，否则 LVGL 还在遍历已销毁的对象。 */
+        lv_async_call(pw_switch_page, (void *)(intptr_t)(c == PW_K_SYM ? 1 : 0));
+        break;
+    case PW_K_DEL:
+        lv_textarea_del_char(s_pw_ta);
+        break;
+    default:
+        lv_textarea_add_char(s_pw_ta, (uint32_t)(uint8_t)c);
+        break;
+    }
+}
+
+static lv_obj_t *pw_key(lv_obj_t *parent, lv_coord_t x, lv_coord_t y, lv_coord_t w, lv_coord_t h,
+                        const char *label, lv_color_t bg, lv_color_t fg)
+{
+    lv_obj_t *k = rk_box(parent, x, y, w, h);
+    lv_obj_add_flag(k, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_radius(k, 8, 0);
+    lv_obj_set_style_bg_color(k, bg, 0);
+    lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_opa(k, LV_OPA_60, LV_STATE_PRESSED);
+
+    lv_obj_t *l = lv_label_create(k);
+    lv_label_set_text(l, label);
+    lv_obj_set_style_text_font(l, RK_FONT_BODY, 0);
+    lv_obj_set_style_text_color(l, fg, 0);
+    lv_obj_center(l);
+    lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
+    return k;
+}
+
+/* 重建整块键盘（首次打开 / 字母↔数字切换） */
+static void pw_kb_build(void)
+{
+    if (!s_pw_kb || !s_wifi_pw.root) {
+        return;
+    }
+    lv_obj_clean(s_pw_kb);
+
+    const rk_theme_t *th = rk_theme();
+    const char *const *rows = s_pw_mode ? PW_ROWS_NUM : PW_ROWS_ABC;
+    int n = 0;
+
+    for (int r = 0; r < PW_ROWS; r++) {
+        const char *s = rows[r];
+        int cnt = (int)strlen(s);
+        if (cnt <= 0) {
+            continue;
+        }
+        lv_coord_t y = PW_ROW_Y + r * (PW_ROW_H + PW_ROW_GAP);
+        lv_coord_t avail = pw_row_w(y, PW_ROW_H);
+        lv_coord_t kw = (avail - (cnt - 1) * PW_KEY_GAP) / cnt;
+        lv_coord_t total = kw * cnt + (cnt - 1) * PW_KEY_GAP;
+        lv_coord_t x = (LCD_WIDTH - total) / 2;
+
+        for (int i = 0; i < cnt && n < PW_KEY_MAX; i++, n++) {
+            char c = s[i];
+            char one[2] = {c, '\0'};
+            const char *label = one;
+            if (c == PW_K_SYM) {
+                label = "1#";
+            } else if (c == PW_K_DEL) {
+                label = "DEL";
+            } else if (c == PW_K_ABC) {
+                label = "AB";
+            }
+            bool fn = (c == PW_K_SYM || c == PW_K_DEL || c == PW_K_ABC);
+            lv_obj_t *k = pw_key(s_pw_kb, x + i * (kw + PW_KEY_GAP), y, kw, PW_ROW_H, label,
+                                 fn ? th->bg : th->card, fn ? th->muted : th->ink);
+            s_kb_ch[n] = c;
+            sdgoods_tap_bind(k, &s_kb_ctx[n], pw_key_any, (void *)(intptr_t)n);
+        }
+    }
+
+    /* 底行：空格 + 连接。底边 y=313，弦宽只有 242px，所以只放两个键 */
+    lv_coord_t y = PW_ROW_Y + PW_ROWS * (PW_ROW_H + PW_ROW_GAP);
+    lv_coord_t avail = pw_row_w(y, PW_ROW_H);
+    lv_coord_t ok_w = 84;
+    lv_coord_t sp_w = avail - ok_w - 8;
+    if (sp_w > 140) {
+        sp_w = 140;
+    }
+    lv_coord_t total = sp_w + 8 + ok_w;
+    lv_coord_t x = (LCD_WIDTH - total) / 2;
+
+    lv_obj_t *sp = pw_key(s_pw_kb, x, y, sp_w, PW_ROW_H, "", th->card, th->ink);
+    /* 空格键不写字：画一条短横线居中，比一排下划线干净 */
+    lv_obj_t *bar = rk_box(sp, (sp_w - 28) / 2, PW_ROW_H / 2 - 1, 28, 2);
+    lv_obj_set_style_radius(bar, 1, 0);
+    lv_obj_set_style_bg_color(bar, th->muted, 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+
+    if (n < PW_KEY_MAX) {
+        s_kb_ch[n] = ' ';
+        sdgoods_tap_bind(sp, &s_kb_ctx[n], pw_key_any, (void *)(intptr_t)n);
+        n++;
+    }
+
+    lv_obj_t *ok = pw_key(s_pw_kb, x + sp_w + 8, y, ok_w, PW_ROW_H, "连接", th->ink, th->on_accent);
+    sdgoods_tap_bind(ok, &s_pw_ctx[0], wifi_connect_cb, NULL);
 }
 
 static void radio_pages_open_wifi_pw(lv_obj_t *parent)
@@ -429,13 +607,13 @@ static void radio_pages_open_wifi_pw(lv_obj_t *parent)
     lv_obj_set_style_text_font(ssid, RK_FONT_SMALL, 0);
     lv_obj_set_style_text_color(ssid, th->muted, 0);
     lv_obj_set_pos(ssid, 58, 96);
-    lv_obj_set_width(ssid, 244);
+    lv_obj_set_size(ssid, 244, 18);
     lv_label_set_long_mode(ssid, LV_LABEL_LONG_DOT);
     lv_obj_clear_flag(ssid, LV_OBJ_FLAG_CLICKABLE);
 
     s_pw_ta = lv_textarea_create(s_wifi_pw.root);
-    lv_obj_set_size(s_pw_ta, 244, 42);
-    lv_obj_set_pos(s_pw_ta, 58, 118);
+    lv_obj_set_size(s_pw_ta, 244, 38);
+    lv_obj_set_pos(s_pw_ta, 58, 112);
     lv_textarea_set_one_line(s_pw_ta, true);
     lv_textarea_set_max_length(s_pw_ta, 64);
     lv_textarea_set_password_mode(s_pw_ta, true);
@@ -447,23 +625,13 @@ static void radio_pages_open_wifi_pw(lv_obj_t *parent)
     lv_obj_set_style_border_width(s_pw_ta, 1, 0);
     lv_obj_set_style_border_color(s_pw_ta, th->hair, 0);
     lv_obj_set_style_radius(s_pw_ta, 10, 0);
+    /* 光标必须在末尾：add_char 是「在光标处插入」，停在 0 会让密码倒序 */
+    lv_textarea_set_cursor_pos(s_pw_ta, LV_TEXTAREA_CURSOR_LAST);
 
-    lv_obj_t *ok = rk_pill(s_wifi_pw.root, 58, 172, 112, 36, "连接", th->ink, th->bg);
-    sdgoods_tap_bind(ok, &s_pw_ctx[0], wifi_connect_cb, NULL);
-    lv_obj_t *back = rk_pill(s_wifi_pw.root, 190, 172, 112, 36, "返回", th->card, th->ink);
-    sdgoods_tap_bind(back, &s_pw_ctx[1], wifi_pw_back_cb, NULL);
-
-    lv_obj_t *kb = lv_keyboard_create(s_wifi_pw.root);
-    lv_obj_set_size(kb, 360, 150);
-    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_keyboard_set_textarea(kb, s_pw_ta);
-    lv_keyboard_set_mode(kb, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_set_style_bg_color(kb, th->card, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(kb, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(kb, th->bg, LV_PART_ITEMS);
-    lv_obj_set_style_text_color(kb, th->ink, LV_PART_ITEMS);
-    lv_obj_set_style_border_width(kb, 0, LV_PART_ITEMS);
-    lv_obj_move_foreground(kb);
+    /* 键盘容器：整屏透明、不吞触摸（按键自己 CLICKABLE，空白处落到 root） */
+    s_pw_kb = rk_box(s_wifi_pw.root, 0, 0, LCD_WIDTH, LCD_HEIGHT);
+    s_pw_mode = 0;
+    pw_kb_build();
 }
 
 static void radio_pages_open_wifi(lv_obj_t *parent)
