@@ -482,9 +482,14 @@ static int rp_attempt(const char *url, bool is_aac, uint32_t sess_seq,
         fill += got;
         probe += got;
 
-        /* 解码缓冲里的全部数据 */
+        /* 解码缓冲里的全部数据。每帧前先看 s_paused：暂停指令不能等这一大块
+         * raw 全喂完才生效，否则一次点击要再响 100ms 以上。未消费的尾巴会在
+         * 下面 memmove 前移，恢复播放后接着解，不丢数据。 */
         size_t consumed = 0;
         while (fill - consumed > 0 && s_seq == sess_seq) {
+            if (s_paused) {
+                break;
+            }
             esp_audio_simple_dec_raw_t rin;
             memset(&rin, 0, sizeof(rin));
             rin.buffer = raw + consumed;
@@ -730,6 +735,9 @@ esp_err_t radio_player_play(const char *url, const char *codec_hint)
     }
     s_stop = false;
     s_seq++;
+    /* 换台先把上一路的采样率抹掉：解码首帧之前 UI 不该拿旧值冒充新台参数 */
+    s_rate = 0;
+    s_ch = 0;
     xSemaphoreGive(s_mu);
     s_state = RP_CONNECTING;
     xSemaphoreGive(s_wake);
@@ -757,7 +765,17 @@ void radio_player_stop(void)
 void radio_player_set_paused(bool paused)
 {
     s_paused = paused;
-    if (!paused && s_state == RP_PAUSED) {
+    if (paused) {
+        /* 暂停要立即宣告，不能等解码循环。rp_task 每轮先看 s_paused 再干活，
+         * 但它可能正阻塞在一次 i2s 写（或一整块 raw 的解码）里，那段就是
+         * 「点了暂停没反应」的观感时长。这里只翻状态位，真正的停声仍由
+         * s_paused 控制（见 rp_attempt 的内外两层检查）。
+         * ⚠️ 只改 PLAYING：BUFFERING/CONNECTING 阶段若也标 PAUSED，恢复时
+         *    主循环会把「还没出声」误置成 PLAYING（状态比事实超前）。 */
+        if (s_state == RP_PLAYING) {
+            s_state = RP_PAUSED;
+        }
+    } else if (s_state == RP_PAUSED) {
         s_state = RP_PLAYING;
     }
 }
