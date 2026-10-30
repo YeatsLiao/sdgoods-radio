@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "recorded_on": "2026-10-29",
+  "scope": "radio-v3-confirmed-directions",
+  "status": "implemented-candidate-hardware-unverified",
+  "default_skin": null,
+  "recommended_initial_default": "dot-matrix",
+  "generation_method": "built-in-imagegen",
+  "sheets": {
+    "modern-four": {
+      "file": "modern-four.png",
+      "rows": 2,
+      "columns": 2,
+      "sha256": "daa054598f4f81403da6016a55db1249791b600d5108bbd1532d6e2c73f0d410"
+    },
+    "pixel-six": {
+      "file": "pixel-six.png",
+      "rows": 2,
+      "columns": 3,
+      "sha256": "4cc668fc13ed85fdbd579bbcc20602562d28565a89abb1a819c0ab6ccf0352ef"
+    }
+  },
+  "position_indexing": "one-based-row-and-column",
+  "skins": [
+    {
+      "number": "S01",
+      "id": "editorial",
+      "name_zh": "大字编辑风",
+      "name_en": "Editorial",
+      "sheet": "modern-four",
+      "row": 1,
+      "column": 1,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "暖白、黑色大字、朱红点缀；动态台名优先"
+    },
+    {
+      "number": "S02",
+      "id": "dot-matrix",
+      "name_zh": "点阵电波",
+      "name_en": "Dot Matrix",
+      "sheet": "modern-four",
+      "row": 1,
+      "column": 2,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "preferred_accent": "#D44A34",
+      "direction": "黑底白色点阵与红色直播标记；延续已确认的黑红点阵"
+    },
+    {
+      "number": "S03",
+      "id": "pixel-host",
+      "name_zh": "像素主播",
+      "name_en": "Pixel Host",
+      "sheet": "modern-four",
+      "row": 2,
+      "column": 1,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "淡紫底与绿色耳机角色",
+      "animation": {
+        "type": "float-and-notes",
+        "state": "implemented-hardware-unverified",
+        "playback_only": true
+      }
+    },
+    {
+      "number": "S04",
+      "id": "sound-field",
+      "name_zh": "声波极简",
+      "name_en": "Sound Field",
+      "sheet": "modern-four",
+      "row": 2,
+      "column": 2,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "黑底蓝青紫声波与清晰台名；电平实时绘制"
+    },
+    {
+      "number": "S05",
+      "id": "cat-dj",
+      "name_zh": "猫咪 DJ",
+      "name_en": "Cat DJ",
+      "sheet": "pixel-six",
+      "row": 1,
+      "column": 1,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "奶油杏色、黑猫、珊瑚色耳机",
+      "animation": {
+        "type": "bob-and-notes",
+        "state": "implemented-hardware-unverified",
+        "playback_only": true
+      }
+    },
+    {
+      "number": "S06",
+      "id": "space-signal",
+      "name_zh": "太空电波",
+      "name_en": "Space Signal",
+      "sheet": "pixel-six",
+      "row": 1,
+      "column": 2,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "深蓝底、宇航员、薄荷色操作区",
+      "animation": {
+        "type": "float-and-stars",
+        "state": "implemented-hardware-unverified",
+        "playback_only": true
+      }
+    },
+    {
+      "number": "S07",
+      "id": "seaside-sunset",
+      "name_zh": "海边落日",
+      "name_en": "Seaside Sunset",
+      "sheet": "pixel-six",
+      "row": 1,
+      "column": 3,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "橘色夕阳、青绿海面、像素帆船",
+      "animation": {
+        "type": "water-glints",
+        "state": "implemented-hardware-unverified",
+        "playback_only": true
+      }
+    },
+    {
+      "number": "S08",
+      "id": "rainy-shop",
+      "name_zh": "雨夜便利店",
+      "name_en": "Rainy Shop",
+      "sheet": "pixel-six",
+      "row": 2,
+      "column": 1,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "靛蓝雨夜、暖色窗口、戴耳机角色",
+      "animation": {
+        "type": "rain-and-reflections",
+        "state": "implemented-hardware-unverified",
+        "playback_only": true
+      }
+    },
+    {
+      "number": "S09",
+      "id": "pocket-player",
+      "name_zh": "掌机音乐盒",
+      "name_en": "Pocket Player",
+      "sheet": "pixel-six",
+      "row": 2,
+      "column": 2,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "开心果绿、紫色机器人、珊瑚色耳机",
+      "animation": {
+        "type": "bob-and-display",
+        "state": "implemented-hardware-unverified",
+        "playback_only": true
+      }
+    },
+    {
+      "number": "S10",
+      "id": "garden-capybara",
+      "name_zh": "像素花园",
+      "name_en": "Capybara Garden",
+      "sheet": "pixel-six",
+      "row": 2,
+      "column": 3,
+      "retained": true,
+      "production_assets": "builtin-static-candidate",
+      "direction": "淡黄底、水豚、绿色耳机与盆栽",
+      "animation": {
+        "type": "leaves-and-fireflies",
+        "state": "implemented-hardware-unverified",
+        "playback_only": true
+      }
+    }
+  ],
+  "firmware_version": "1.1.0-rc2",
+  "implemented_on": "2026-10-30",
+  "animation_version": "1.1.0-rc4"
+}
