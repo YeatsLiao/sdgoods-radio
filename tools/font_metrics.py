@@ -64,6 +64,34 @@ BTN_SIZE = 76           # SDG_UI_BTN_SIZE：圆按钮直径
 #              None = 单行不折。设了以后**按折行后的每一行**分别判宽度，
 #              并额外检查「折行块本身（宽 wrap）能不能放进圆屏的弦宽」。
 CASES = [
+    # Radio v3: actual main-screen/picker bounds; large titles reuse 2x glyphs.
+    ("电台时钟", "11:21", 16, 100, 28, "cn_font_16", None),
+    ("直播状态", "LIVE", 14, 240, 52, "cn_font_14", None),
+    ("电台状态", "连接失败，点播放重试", 14, 240, 52, "cn_font_14", None),
+    ("电台状态", "Failed - press play to retry", 14, 240, 52, "cn_font_14", None),
+    ("像素副行", "FM 103.7", 14, 240, 252, "cn_font_14", None),
+    ("外观标题", "外观 13 / 13", 16, 136, 86, "cn_font_16", None),
+    ("外观标题", "Style 13 / 13", 16, 136, 86, "cn_font_16", None),
+    ("页面标题", "Stations", 16, 136, 86, "cn_font_16", None),
+    ("页面操作", "Settings", 14, 56, 87, "cn_font_14", None),
+    ("联网状态", "Connecting", 14, 96, 132, "cn_font_14", None),
+    ("联网状态", "Connected", 14, 96, 132, "cn_font_14", None),
+    ("外观名称", "Capybara Garden", 20, 240, 242, "net_font_20", None),
+    ("外观名称", "雨夜便利店", 20, 240, 242, "net_font_20", None),
+    ("纸感台名", "城市音乐台", 32, 240, 92, None, None),
+    ("纸感频率", "FM 105.4", 16, 240, 140, "cn_font_16", None),
+    ("纸感频道", "CH 03", 16, 240, 140, "cn_font_16", None),
+    ("外观名称", "纸感收音机", 20, 240, 242, "net_font_20", None),
+    ("外观名称", "薄荷像素唱机", 20, 240, 242, "net_font_20", None),
+    ("外观名称", "蓝橙唱片", 20, 240, 242, "net_font_20", None),
+    ("外观名称", "紫夜唱片", 20, 240, 242, "net_font_20", None),
+    ("点阵单位", "FM · MHz", 14, 240, 176, "cn_font_14", None),
+    ("网络频道", "网络频道", 14, 240, 176, "cn_font_14", None),
+    ("键盘控制", "Space", 14, 42, 284, "cn_font_14", None),
+    ("键盘控制", "Join", 14, 42, 284, "cn_font_14", None),
+    ("键盘控制", "1/3>", 14, 42, 284, "cn_font_14", None),
+    ("键盘控制", "空格", 14, 42, 284, "cn_font_14", None),
+    ("键盘控制", "连接", 14, 42, 284, "cn_font_14", None),
     # ---------------- 主页（ui_home.c）----------------
     # y 用 SDG_UI_TITLE_Y(=35)，与 DEMO / 应用页标题同高
     ("主页标题",   "主页",           16, 0, 35, None, None),
@@ -126,7 +154,7 @@ CASES = [
 ]
 
 NAMES = ("cn_font_14", "cn_font_16",
-         "si_yuan_black_icon_14", "si_yuan_black_icon_16")
+         "si_yuan_black_icon_14", "si_yuan_black_icon_16", "net_font_20")
 
 
 def circle_chord(y, h):
@@ -196,7 +224,7 @@ def load_old(ref):
             try:
                 txt = subprocess.run(
                     ["git", "-C", ROOT, "show", f"{ref}:{rel}/{n}.c"],
-                    capture_output=True, text=True, check=True).stdout
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout
             except subprocess.CalledProcessError:
                 continue
             try:
@@ -222,6 +250,10 @@ def measure(s, maps):
 def maps_for(fonts, size, font_key=None):
     if font_key:
         return [fonts.get(font_key, {})]
+    if size in (20, 24, 28, 32, 40, 48, 64):
+        scale = size / 20
+        return [{cp: width * scale for cp, width in fonts.get(key, {}).items()}
+                for key in ("net_font_20", "cn_font_16")]
     if size == 14:
         order = ("si_yuan_black_icon_14", "cn_font_14")
     else:
@@ -287,7 +319,7 @@ def main():
     if ref is None:
         try:
             ref = subprocess.run(["git", "-C", ROOT, "rev-list", "--max-parents=0", "HEAD"],
-                                 capture_output=True, text=True, check=True).stdout.split()[0]
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout.split()[0]
         except (subprocess.CalledProcessError, IndexError):
             ref = None
     old = load_old(ref) if ref else {}

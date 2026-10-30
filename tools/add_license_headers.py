@@ -35,6 +35,7 @@
 ⚠️ 模板改动会影响仓库里所有自有源文件（几十个），改完请 `git diff --stat` 扫一眼。
 """
 import glob
+import argparse
 import os
 import sys
 
@@ -94,12 +95,12 @@ def collect():
     plat = []
     for ext in ("*.c", "*.h"):
         plat += glob.glob(os.path.join(REPO, "components/sdgoods_board/**", ext), recursive=True)
-    plat = [p for p in plat if "/fonts/" not in p]
+    plat = [p for p in plat if "/fonts/" not in p.replace("\\", "/")]
 
     app = []
     for ext in ("*.c", "*.h"):
         app += glob.glob(os.path.join(REPO, "main/**", ext), recursive=True)
-    app = [p for p in app if "/patches/" not in p]
+    app = [p for p in app if "/patches/" not in p.replace("\\", "/")]
 
     tools = [p for p in glob.glob(os.path.join(REPO, "tools", "*.py"))
              if os.path.abspath(p) != os.path.abspath(__file__)]
@@ -144,6 +145,8 @@ def stamp(path, header):
     """返回 (新内容 或 None, 状态)。"""
     with open(path, "r", encoding="utf-8", newline="") as f:
         src = f.read()
+    if "SPDX-License-Identifier: OFL-1.1" in src[:2000]:
+        return None, "up-to-date"
 
     body = _c_block_end(src)
     if body is None:
@@ -171,8 +174,16 @@ def stamp(path, header):
 
 
 def main():
-    apply = "--apply" in sys.argv
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--files", nargs="+", help="Limit stamping to named files")
+    args = parser.parse_args()
+    apply = args.apply
     plat, app, tools = collect()
+    if args.files:
+        selected = {os.path.normcase(os.path.abspath(p)) for p in args.files}
+        plat, app, tools = ([p for p in group if os.path.normcase(os.path.abspath(p)) in selected]
+                            for group in (plat, app, tools))
 
     groups = [("平台层 Apache-2.0", plat, APACHE_C),
               ("应用层 Apache-2.0", app, NC_C),
