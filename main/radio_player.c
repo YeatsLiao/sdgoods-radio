@@ -58,6 +58,9 @@ static const char *TAG = "radio_player";
 #define RP_CODEC_CAP     16
 #define RP_TASK_STACK    8192
 #define RP_TASK_PRIO     6               /* 高于 LVGL(5) 保证音频连续；双核 S3 */
+#define RP_CONNECT_MAX_MS 20000
+#define RP_STARTUP_MAX_MS 30000
+#define RP_STABLE_PLAY_MS 10000
 
 /* ★ 毫秒延时必须至少折算 1 tick。
  *   CONFIG_FREERTOS_HZ=100 ⇒ 1 tick = 10ms，pdMS_TO_TICKS(5) 算出来是 0，
@@ -101,9 +104,18 @@ static uint32_t              s_head, s_tail, s_len;  /* 写位/读位/有效字�
 static volatile bool         s_net_eof;              /* 生产者已结束（任何原因） */
 static volatile bool         s_net_stop;             /* 消费者请求生产者停下 */
 static volatile bool         s_net_alive;            /* 生产者任务在跑 */
+static volatile bool         s_net_connected;
 static volatile int          s_net_reason;           /* 生产者开流失败原因 RP_END_* */
 static volatile uint32_t     s_net_seq;              /* 生产者所属会话代际 */
 static char                  s_net_url[RP_URL_CAP];  /* 传给生产者的 url 快照 */
+
+/* Publish only for the current command. An old decoder may finish after a tap. */
+static void rp_set_state(uint32_t seq, radio_player_state_t state)
+{
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    if (s_seq == seq) s_state = state;
+    xSemaphoreGive(s_mu);
+}
 
 /* ---------------------------------------------------------------------------
  * 电平表：把一段 PCM 按帧切成 RADIO_PLAYER_LEVELS 个窗口，取峰值 → 对数刻度 0~255。
@@ -294,6 +306,7 @@ static void rp_net_task(void *arg)
     int status = 0;
     bool opened = false;
     for (int hop = 0; hop <= RP_MAX_REDIRECT; hop++) {
+        if (s_seq != sess || s_net_stop) break;
         s_redirect_loc[0] = '\0';   /* 每次请求前清掉上一跳的 Location */
         if (esp_http_client_open(http, 0) != ESP_OK) {
             ESP_LOGW(TAG, "http open failed: %s", cur);
@@ -302,6 +315,7 @@ static void rp_net_task(void *arg)
         opened = true;
         esp_http_client_fetch_headers(http);
         status = esp_http_client_get_status_code(http);
+        if (s_seq != sess || s_net_stop) break;
         if (status / 100 != 3 || s_redirect_loc[0] == '\0') {
             break;
         }
@@ -322,7 +336,7 @@ static void rp_net_task(void *arg)
         ESP_LOGI(TAG, "http %d -> %s", status, cur);
     }
 
-    if (!opened || status / 100 != 2) {
+    if (!opened || status / 100 != 2 || s_seq != sess || s_net_stop) {
         if (opened) {
             ESP_LOGW(TAG, "http status %d for %s", status, cur);
         }
@@ -333,9 +347,11 @@ static void rp_net_task(void *arg)
     /* 建连阶段用的是宽容超时；开始拉流后换成短超时，死台/切台少白等 */
     esp_http_client_set_timeout_ms(http, RP_HTTP_READ_TIMEOUT);
     s_net_reason = RP_END_DISCONNECT;   /* 之后若因读<=0 结束，按断流计 */
+    s_net_connected = true;
     ESP_LOGI(TAG, "net: connected, streaming");
 
     uint8_t *tmp = heap_caps_malloc(RP_READ_CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    bool tmp_owned = tmp != NULL;
     int rchunk = (int)RP_READ_CHUNK;
     if (!tmp) {   /* 兜底：无 PSRAM 就用栈上小块（注意同步缩小单次读入量，勿越界） */
         static uint8_t stackbuf[2048];
@@ -348,19 +364,20 @@ static void rp_net_task(void *arg)
      *   但 TLS 记录只到了一半，mbedtls 返回 WANT_READ）。
      *   旧代码 `r <= 0` 一律 break，于是切歌/网络抖动几秒就整条流重连一次，
      *   表现为“长时间播放后偶发断一次”。这里只累计空闲时间。 */
-    int idle_ms = 0;
+    TickType_t last_data = xTaskGetTickCount();
     while (s_seq == sess && !s_net_stop) {
         int r = esp_http_client_read(http, (char *)tmp, rchunk);
         if (r == -ESP_ERR_HTTP_EAGAIN) {
-            idle_ms += RP_HTTP_READ_TIMEOUT;
+            unsigned idle_ms = (xTaskGetTickCount() - last_data) * portTICK_PERIOD_MS;
             if (idle_ms >= RP_NET_IDLE_MAX_MS) {
-                ESP_LOGW(TAG, "no data for %dms, closing stream", idle_ms);
+                ESP_LOGW(TAG, "no data for %ums, closing stream", idle_ms);
                 break;
             }
+            rp_delay_ms(10);
             continue;
         }
         if (r <= 0) break;              /* 真断流 / 服务端 FIN */
-        idle_ms = 0;
+        last_data = xTaskGetTickCount();
         uint32_t off = 0;
         while (off < (uint32_t)r && s_seq == sess && !s_net_stop) {
             uint32_t w = ring_write(tmp + off, (uint32_t)r - off);
@@ -370,6 +387,7 @@ static void rp_net_task(void *arg)
     }
     esp_http_client_close(http);
     esp_http_client_cleanup(http);
+    if (tmp_owned) heap_caps_free(tmp);
     s_net_eof = true;
     s_net_alive = false;
     rp_task_exit();
@@ -396,6 +414,9 @@ static int rp_attempt(const char *url, bool is_aac, uint32_t sess_seq,
     int rc = RP_END_HTTP_FAIL;
     esp_audio_simple_dec_handle_t dec = NULL;
     bool stream_started = false;
+    uint32_t stream_rate = 0;
+    uint8_t stream_ch = 0;
+    uint64_t decoded_frames = 0;
 
     /* 复位环形缓冲并拉起网络生产者：生产者独立拉流灌 s_ring（PSRAM 64KB），
      * 本消费者只从环形缓冲取数据解码。网络与播放解耦后，即使这里阻塞在
@@ -403,6 +424,7 @@ static int rp_attempt(const char *url, bool is_aac, uint32_t sess_seq,
     ring_reset();
     s_net_seq = sess_seq;
     s_net_eof = false;
+    s_net_connected = false;
     s_net_stop = false;
     s_net_reason = RP_END_HTTP_FAIL;
     s_net_alive = true;
@@ -421,17 +443,27 @@ static int rp_attempt(const char *url, bool is_aac, uint32_t sess_seq,
         return RP_END_HTTP_FAIL;
     }
 
-    s_state = RP_BUFFERING;
+    rp_set_state(sess_seq, RP_CONNECTING);
     size_t fill = 0;
     size_t probe = 0;
-    TickType_t t_first_frame = xTaskGetTickCount();   /* 首帧看门狗起点 */
+    TickType_t t_connect = xTaskGetTickCount();
+    while (s_seq == sess_seq && !s_net_connected && !s_net_eof) {
+        if ((xTaskGetTickCount() - t_connect) * portTICK_PERIOD_MS >= RP_CONNECT_MAX_MS) {
+            ESP_LOGW(TAG, "connection deadline reached");
+            s_net_stop = true;
+            break;
+        }
+        rp_delay_ms(20);
+    }
+    TickType_t t_first_frame = xTaskGetTickCount();
+    if (s_net_connected) rp_set_state(sess_seq, RP_BUFFERING);
 
     /* 起播前先在环形缓冲里攒够 RP_PREBUFFER，给随后的网络抖动留垫。
      * 但设上限等待：慢速/涓流台若迟迟凑不满，超时后带已有数据直接进主循环
      * 解码（主循环有 probe/NO_DATA 兑底），避免无限“缓冲中”卡死。 */
     uint32_t waited = 0;
     while (s_seq == sess_seq && !s_paused && ring_len() < RP_PREBUFFER) {
-        if (s_net_eof) {
+        if (s_net_eof || s_net_stop) {
             break;   /* 生产者已结束：再等也不会长数据，带已有缓冲进主循环判定 */
         }
         if (waited >= RP_PREBUFFER_MAX_MS) {
@@ -443,14 +475,15 @@ static int rp_attempt(const char *url, bool is_aac, uint32_t sess_seq,
     }
 
     while (s_seq == sess_seq) {
+        if (s_net_stop) break;
         if (s_paused) {
-            s_state = RP_PAUSED;
+            rp_set_state(sess_seq, RP_PAUSED);
             t_first_frame = xTaskGetTickCount();   /* 暂停不算超时 */
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
         if (s_state == RP_PAUSED) {
-            s_state = RP_PLAYING;
+            rp_set_state(sess_seq, stream_started ? RP_PLAYING : RP_BUFFERING);
         }
 
         /* 首帧看门狗：开了连接但迟迟解不出音频（涓流/只发头）就主动放弃这台，
@@ -501,29 +534,46 @@ static int rp_attempt(const char *url, bool is_aac, uint32_t sess_seq,
             o.len = RP_OUT_CAP;
 
             esp_audio_err_t e = esp_audio_simple_dec_process(dec, &rin, &o);
+            if (rin.consumed > rin.len || o.decoded_size > RP_OUT_CAP) {
+                ESP_LOGE(TAG, "invalid decoder lengths");
+                rc = RP_END_NO_DATA;
+                s_net_stop = true;
+                break;
+            }
             consumed += rin.consumed;
+            if (s_seq != sess_seq) break;
 
             if (e == ESP_AUDIO_ERR_OK && o.decoded_size > 0) {
                 if (!stream_started) {
                     esp_audio_simple_dec_info_t info;
                     memset(&info, 0, sizeof(info));
                     esp_audio_simple_dec_get_info(dec, &info);
-                    s_rate = info.sample_rate ? info.sample_rate : 44100;
-                    s_ch = info.channel ? info.channel : 1;
-                    if (sdgoods_audio_stream_start(s_rate, s_ch) != ESP_OK) {
-                        ESP_LOGE(TAG, "stream_start %uHz ch%u failed", (unsigned)s_rate, s_ch);
+                    stream_rate = info.sample_rate ? info.sample_rate : 44100;
+                    stream_ch = info.channel ? info.channel : 1;
+                    if (sdgoods_audio_stream_start(stream_rate, stream_ch) != ESP_OK) {
+                        ESP_LOGE(TAG, "stream_start %uHz ch%u failed", (unsigned)stream_rate, stream_ch);
                         rc = RP_END_DISCONNECT;
+                        s_net_stop = true;
                         break;
                     }
                     stream_started = true;
-                    s_state = RP_PLAYING;
-                    *played = true;
+                    xSemaphoreTake(s_mu, portMAX_DELAY);
+                    if(s_seq == sess_seq){s_rate=stream_rate;s_ch=stream_ch;s_state=RP_PLAYING;}
+                    xSemaphoreGive(s_mu);
                     ESP_LOGI(TAG, "playing: %u Hz ch=%u %s",
-                             (unsigned)s_rate, s_ch, is_aac ? "AAC" : "MP3");
+                             (unsigned)stream_rate, stream_ch, is_aac ? "AAC" : "MP3");
                 }
-                sdgoods_audio_stream_write((const int16_t *)outb, o.decoded_size);
-                rp_update_levels(outb, o.decoded_size, s_ch);
-            } else if (rin.consumed == 0) {
+                if(s_seq != sess_seq) break;
+                if(sdgoods_audio_stream_write((const int16_t *)outb, o.decoded_size) != ESP_OK){
+                    ESP_LOGW(TAG, "stream write failed");
+                    rc=RP_END_DISCONNECT;
+                    s_net_stop=true;
+                    break;
+                }
+                decoded_frames += o.decoded_size / (sizeof(int16_t) * stream_ch);
+                rp_update_levels(outb, o.decoded_size, stream_ch);
+            }
+            if (rin.consumed == 0) {
                 break;   /* 无进展，留待更多数据 */
             }
         }
@@ -550,6 +600,7 @@ static int rp_attempt(const char *url, bool is_aac, uint32_t sess_seq,
      * 再关解码器 / 冲停 I2S。http 由生产者自己成对关闭。 */
     rp_net_shutdown();
     if (stream_started) {
+        *played = decoded_frames * 1000 >= (uint64_t)stream_rate * RP_STABLE_PLAY_MS;
         sdgoods_audio_stream_stop();
     }
     if (dec) {
@@ -564,11 +615,12 @@ static int rp_attempt(const char *url, bool is_aac, uint32_t sess_seq,
 static void rp_session(const char *url, const char *codec, uint32_t sess_seq,
                        uint8_t *raw, uint8_t *outb)
 {
-    bool hint = (codec[0] != '\0');
-    bool aac = hint && (strstr(codec, "aac") || strstr(codec, "AAC") ||
+    bool aac = (strstr(codec, "aac") || strstr(codec, "AAC") ||
                         strstr(codec, "mp4") || strstr(codec, "m4a"));
+    bool hint = aac || strcasecmp(codec, "MP3") == 0;
     int flips = 0;
     int attempts = 0;
+    TickType_t startup = xTaskGetTickCount();
 
     for (;;) {
         if (s_seq != sess_seq) {
@@ -592,21 +644,28 @@ static void rp_session(const char *url, const char *codec, uint32_t sess_seq,
         /* 正常播过一阵（曾进 PLAYING）后断流：视为网络问题，重连计数清零 */
         if (played) {
             attempts = 0;
+            startup = xTaskGetTickCount();
+        }
+
+        if ((xTaskGetTickCount() - startup) * portTICK_PERIOD_MS >= RP_STARTUP_MAX_MS) {
+            ESP_LOGW(TAG, "startup deadline reached");
+            rp_set_state(sess_seq, RP_ERROR);
+            return;
         }
 
         if (++attempts <= RP_MAX_RETRY) {
-            s_state = RP_CONNECTING;
+            rp_set_state(sess_seq, RP_CONNECTING);
             uint32_t backoff_ms = 500u * (uint32_t)attempts;
             if (backoff_ms > 3000u) {
                 backoff_ms = 3000u;
             }
             ESP_LOGW(TAG, "reconnect attempt %d/%d in %ums", attempts, RP_MAX_RETRY, (unsigned)backoff_ms);
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+            for (uint32_t wait = 0; wait < backoff_ms && s_seq == sess_seq; wait += 50) rp_delay_ms(50);
             continue;
         }
 
         ESP_LOGE(TAG, "giving up after %d attempts", RP_MAX_RETRY);
-        s_state = RP_ERROR;
+        rp_set_state(sess_seq, RP_ERROR);
         return;
     }
 }
@@ -628,6 +687,7 @@ static void rp_task(void *arg)
         return;
     }
 
+    uint32_t handled_seq = UINT32_MAX;
     for (;;) {
         xSemaphoreTake(s_wake, portMAX_DELAY);
 
@@ -639,19 +699,22 @@ static void rp_task(void *arg)
         memcpy(codec, s_codec, sizeof(codec));
         stop = s_stop;
         s_stop = false;
+        uint32_t sess_seq = s_seq;
         xSemaphoreGive(s_mu);
+
+        if (sess_seq == handled_seq) continue;
+        handled_seq = sess_seq;
 
         if (stop || url[0] == '\0') {
             continue;
         }
 
-        uint32_t sess_seq = s_seq;
         memset((void *)s_levels, 0, sizeof(s_levels));
         rp_session(url, codec, sess_seq, raw, outb);
 
         /* 会话结束：若未被取代，说明已置 ERROR 或干净收尾 */
         if (s_seq == sess_seq && s_state != RP_ERROR) {
-            s_state = RP_IDLE;
+            rp_set_state(sess_seq, RP_IDLE);
         }
     }
 }
@@ -716,7 +779,7 @@ esp_err_t radio_player_init(void)
 
 esp_err_t radio_player_play(const char *url, const char *codec_hint)
 {
-    if (!url || url[0] == '\0') {
+    if (!url || url[0] == '\0' || strlen(url) >= RP_URL_CAP) {
         return ESP_ERR_INVALID_ARG;
     }
     esp_err_t err = radio_player_init();
@@ -738,8 +801,9 @@ esp_err_t radio_player_play(const char *url, const char *codec_hint)
     /* 换台先把上一路的采样率抹掉：解码首帧之前 UI 不该拿旧值冒充新台参数 */
     s_rate = 0;
     s_ch = 0;
-    xSemaphoreGive(s_mu);
     s_state = RP_CONNECTING;
+    memset((void *)s_levels, 0, sizeof(s_levels));
+    xSemaphoreGive(s_mu);
     xSemaphoreGive(s_wake);
     return ESP_OK;
 }
@@ -776,7 +840,7 @@ void radio_player_set_paused(bool paused)
             s_state = RP_PAUSED;
         }
     } else if (s_state == RP_PAUSED) {
-        s_state = RP_PLAYING;
+        s_state = s_rate ? RP_PLAYING : RP_BUFFERING;
     }
 }
 
