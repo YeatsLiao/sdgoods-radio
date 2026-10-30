@@ -1,0 +1,162 @@
+{
+  "source_sha256": "633f7d638197f25edf98c74e354ebffd0c2a20e2fbb5c1cd424eb9a99c31927f",
+  "size": [
+    240,
+    140
+  ],
+  "format": "LV_IMG_CF_INDEXED_4BIT",
+  "assets": [
+    {
+      "name": "host",
+      "bytes": 16864,
+      "sha256": "a163bc06159fe92542b6d83ed830b1c378356da8077bfdb900e5f3f84bac2863",
+      "cell": 1,
+      "source_content_bounds": [
+        45,
+        106,
+        394,
+        340
+      ],
+      "visible_bounds": [
+        24,
+        6,
+        215,
+        134
+      ],
+      "padding": 6
+    },
+    {
+      "name": "cat",
+      "bytes": 16864,
+      "sha256": "4911f5d6f7904989aa7bb1863abf100e4f7734d7d59b8dd4255835e614639f91",
+      "cell": 2,
+      "source_content_bounds": [
+        37,
+        118,
+        402,
+        359
+      ],
+      "visible_bounds": [
+        23,
+        6,
+        217,
+        134
+      ],
+      "padding": 6
+    },
+    {
+      "name": "space",
+      "bytes": 16864,
+      "sha256": "d18ac79ba278706b7b9866aa31082094b259b267a6f5b182b39d40cc47e63252",
+      "cell": 3,
+      "source_content_bounds": [
+        32,
+        98,
+        404,
+        364
+      ],
+      "visible_bounds": [
+        30,
+        6,
+        209,
+        134
+      ],
+      "padding": 6
+    },
+    {
+      "name": "sea",
+      "bytes": 16864,
+      "sha256": "ddceffadd766f746224f485e37aad7990453e0f0bae66a6ccc618eed32e98424",
+      "cell": 4,
+      "source_content_bounds": [
+        18,
+        141,
+        417,
+        386
+      ],
+      "visible_bounds": [
+        16,
+        6,
+        224,
+        134
+      ],
+      "padding": 6
+    },
+    {
+      "name": "rain",
+      "bytes": 16864,
+      "sha256": "c1684b46757f4258db16849f405984cde4306d453669afc847ebae41d6b2118c",
+      "cell": 5,
+      "source_content_bounds": [
+        20,
+        36,
+        420,
+        371
+      ],
+      "visible_bounds": [
+        43,
+        6,
+        196,
+        134
+      ],
+      "padding": 6
+    },
+    {
+      "name": "robot",
+      "bytes": 16864,
+      "sha256": "75f2cb66bd7193a2dbca3006a044e14f3118eab38819cacdd290edfa8bf0bb1c",
+      "cell": 6,
+      "source_content_bounds": [
+        44,
+        74,
+        404,
+        345
+      ],
+      "visible_bounds": [
+        35,
+        6,
+        205,
+        134
+      ],
+      "padding": 6
+    },
+    {
+      "name": "garden",
+      "bytes": 16864,
+      "sha256": "fd55bf398bf22170d53424b96eef87e879d55b7c5f2d46bafaf073aadc757374",
+      "cell": 7,
+      "source_content_bounds": [
+        27,
+        73,
+        413,
+        335
+      ],
+      "visible_bounds": [
+        25,
+        6,
+        214,
+        134
+      ],
+      "padding": 6
+    },
+    {
+      "name": "host_paused",
+      "bytes": 16864,
+      "sha256": "a6c36d8a1b1f4e9ffeb979a250d758a53b57171e88735bc0c0c448660a22c372",
+      "cell": 8,
+      "source_content_bounds": [
+        87,
+        73,
+        380,
+        346
+      ],
+      "visible_bounds": [
+        51,
+        6,
+        188,
+        134
+      ],
+      "padding": 6
+    }
+  ]
+}

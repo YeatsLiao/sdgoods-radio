@@ -13,10 +13,12 @@ idf_component_register(
         "app_data_store.c"
 
         "wifi_prov.c"
+        "wifi_prov_status.c"
 
         "radio_player.c"
 
         "radio_catalog.c"
+        "radio_station_identity.c"
 
         "radio_settings.c"
 
@@ -39,6 +41,10 @@ idf_component_register(
         "apps/ui_radio_kit.c"
         "apps/ui_radio_pages.c"
         "apps/ui_radio.c"
+        "apps/ui_radio_skin.c"
+        "apps/ui_radio_assets.c"
+        "apps/ui_radio_redraw_assets.c"
+        "apps/ui_radio_title_font.c"
 
     INCLUDE_DIRS
         "apps"                  # 让 #include "ui_home.h" 直接可用

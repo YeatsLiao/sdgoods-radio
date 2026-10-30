@@ -7,6 +7,7 @@
 #include "radio_settings.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -107,24 +108,27 @@ const char *radio_settings_get_city(void)
     return s_city;
 }
 
-void radio_settings_set_city(const char *city_zh)
+bool radio_settings_set_city(const char *city_zh)
 {
     nvs_handle_t h;
     if (nvs_open(RS_NS, NVS_READWRITE, &h) != ESP_OK) {
-        return;
+        return false;
     }
+    esp_err_t err=ESP_OK;
     if (city_zh && city_zh[0]) {
         char buf[RS_CITY_MAX];
         strncpy(buf, city_zh, sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
-        if (nvs_set_str(h, RS_KEY_CITY, buf) != ESP_OK) {
+        if ((err=nvs_set_str(h, RS_KEY_CITY, buf)) != ESP_OK) {
             ESP_LOGW(TAG, "set city failed");
         }
     } else {
-        nvs_erase_key(h, RS_KEY_CITY);
+        err=nvs_erase_key(h, RS_KEY_CITY);
+        if(err==ESP_ERR_NVS_NOT_FOUND)err=ESP_OK;
     }
-    nvs_commit(h);
+    if(err==ESP_OK)err=nvs_commit(h);
     nvs_close(h);
+    return err==ESP_OK;
 }
 
 bool radio_settings_get_night(void)
@@ -135,6 +139,41 @@ bool radio_settings_get_night(void)
 void radio_settings_set_night(bool night)
 {
     rs_set_i(RS_KEY_NIGHT, night ? 1 : 0);
+}
+
+const char *radio_settings_get_skin(void)
+{
+    static char id[24];
+    nvs_handle_t h;
+    size_t len = sizeof(id);
+    if (nvs_open(RS_NS, NVS_READONLY, &h) == ESP_OK) {
+        esp_err_t err = nvs_get_str(h, "skin_id", id, &len);
+        int32_t legacy = 1;
+        if (err != ESP_OK) {
+            nvs_get_i32(h, RS_KEY_NIGHT, &legacy);
+            snprintf(id, sizeof(id), "%s", legacy ? "dot-matrix" : "editorial");
+        }
+        nvs_close(h);
+    } else {
+        snprintf(id, sizeof(id), "%s", "dot-matrix");
+    }
+    id[sizeof(id) - 1] = '\0';
+    if(!strcmp(id,"editorial"))snprintf(id,sizeof(id),"paper-radio");
+    if(!strcmp(id,"vinyl-club"))snprintf(id,sizeof(id),"vinyl-pixel");
+    return id;
+}
+
+bool radio_settings_set_skin(const char *id)
+{
+    if (!id || !id[0] || strlen(id) >= 24) return false;
+    if(!strcmp(id,"editorial"))id="paper-radio";
+    if(!strcmp(id,"vinyl-club"))id="vinyl-pixel";
+    nvs_handle_t h;
+    if (nvs_open(RS_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t err = nvs_set_str(h, "skin_id", id);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err == ESP_OK;
 }
 
 bool radio_settings_is_fav(int idx)

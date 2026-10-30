@@ -32,11 +32,15 @@ void radio_settings_set_last_index(int idx);
 /* ---- 城市：UTF-8 中文城市名，空串 = 自动定位。返回值指向内部静态缓冲，
  *      下次调用前有效；写入超长会被截断。---- */
 const char *radio_settings_get_city(void);
-void        radio_settings_set_city(const char *city_zh);
+bool        radio_settings_set_city(const char *city_zh);
 
 /* ---- 主题：true = 夜色 ---- */
 bool radio_settings_get_night(void);
 void radio_settings_set_night(bool night);
+
+/* Stable skin ID. Legacy night preference is used when skin_id is absent. */
+const char *radio_settings_get_skin(void);
+bool radio_settings_set_skin(const char *id);
 
 /* ---- 收藏：32 位位图，set/clear/toggle/get，idx 越界(0..31)安全忽略 ---- */
 bool radio_settings_is_fav(int idx);

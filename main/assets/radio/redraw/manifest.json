@@ -1,0 +1,94 @@
+[
+  {
+    "name": "vinyl_pop",
+    "source": "A-pop-vinyl.png",
+    "source_sha256": "82a55500066363944af798a68ddf06cfbee0454244f561d6a905ba3331bf2d2d",
+    "crop": [
+      232,
+      194,
+      1030,
+      742
+    ],
+    "size": [
+      240,
+      140
+    ],
+    "bytes": 34624,
+    "sha256": "c7dc82082af7faff50cb974cf8cfd1c9fcde44ce535424d27c093a4fe03d9785",
+    "visible_bounds": [
+      28,
+      6,
+      210,
+      133
+    ]
+  },
+  {
+    "name": "vinyl_pixel",
+    "source": "B-pixel-deck.png",
+    "source_sha256": "8c77329c178c554e7e1d5784608b435c46ab6b2e1053ac415cfc327642eab7f1",
+    "crop": [
+      244,
+      224,
+      1030,
+      748
+    ],
+    "size": [
+      240,
+      140
+    ],
+    "bytes": 34624,
+    "sha256": "adb6846929262dc4ce027b9a11414bebc500cafbe6a62e099a82b98d714f35ce",
+    "visible_bounds": [
+      27,
+      8,
+      211,
+      134
+    ]
+  },
+  {
+    "name": "vinyl_night",
+    "source": "C-night-vinyl.png",
+    "source_sha256": "2fd83e39d95d22686da5746a493fbc1fe007d6010fd70ca6fa8ebbe25ee45f92",
+    "crop": [
+      224,
+      207,
+      1090,
+      715
+    ],
+    "size": [
+      240,
+      140
+    ],
+    "bytes": 34624,
+    "sha256": "83831725135931d6ea5c1f98f183e99356e4ceba2d857f2c1fa4c8375b909176",
+    "visible_bounds": [
+      13,
+      8,
+      216,
+      132
+    ]
+  },
+  {
+    "name": "paper_scene",
+    "source": "paper-approved-reference.png",
+    "source_sha256": "c42065fdd7e98992ec1806ab7d618061359e3c61babe1e9dac7db27c2180b43c",
+    "crop": [
+      979,
+      416,
+      1660,
+      478
+    ],
+    "size": [
+      276,
+      28
+    ],
+    "bytes": 3928,
+    "sha256": "954b7c4673cb4bb8db0528981ff6691ea5f161eecda2b0c392c07a06b6ccdf36",
+    "visible_bounds": [
+      0,
+      1,
+      276,
+      26
+    ]
+  }
+]
