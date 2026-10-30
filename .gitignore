@@ -52,3 +52,6 @@ tools/fonts/*.part
 
 # ---- 本机 / 代理工具目录 ----
 .workbuddy/
+
+# 离线 LVGL 渲染、串口诊断与真机截图等本地产物（发布用图另行归档到 docs/design）
+output/
