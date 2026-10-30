@@ -16,6 +16,7 @@
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "sdgoods_lcd.h"
+#include "sdgoods_cc.h"
 
 /* ------------------------------------------------------------------ 主题 */
 static rk_theme_t s_theme;
@@ -65,6 +66,14 @@ void rk_theme_set(bool night)
 bool rk_theme_is_night(void)
 {
     return s_night;
+}
+
+void rk_theme_apply(const rk_theme_t *palette)
+{
+    if (!palette) return;
+    s_theme = *palette;
+    s_theme_ready = true;
+    s_night = lv_color_brightness(palette->bg) < 128;
 }
 
 /* ------------------------------------------------------------------ UTF-8 */
@@ -244,10 +253,12 @@ static void dot_draw_cb(lv_event_t *e)
     if (n > 6) {
         n = 6;
     }
-    int cw = 5 * d->dot + 4 * d->gap;          /* 单字宽 */
-    int adv = cw + d->gap * 2;                 /* 字距 */
     int gh = 7 * d->dot + 6 * d->gap;          /* 字高 */
-    int total = n > 0 ? n * adv - d->gap * 2 : 0;
+    int total = 0;
+    for (int i = 0; i < n; ++i) {
+        int cols = d->text[i] == '.' ? 1 : 5;
+        total += cols * d->dot + (cols - 1) * d->gap + (i ? d->gap * 2 : 0);
+    }
     int x0 = co.x1 + (lv_area_get_width(&co) - total) / 2;
     int y0 = co.y1 + (lv_area_get_height(&co) - gh) / 2;
 
@@ -257,17 +268,19 @@ static void dot_draw_cb(lv_event_t *e)
     rd.bg_opa = LV_OPA_COVER;
     rd.border_width = 0;
     rd.shadow_width = 0;
-    rd.radius = 1;
+    rd.radius = LV_RADIUS_CIRCLE;
 
+    int gx = x0;
     for (int i = 0; i < n; i++) {
         const uint8_t *g = glyph_of(d->text[i]);
         if (!g) {
             continue;
         }
-        int gx = x0 + i * adv;
-        for (int col = 0; col < 5; col++) {
+        int cols = d->text[i] == '.' ? 1 : 5;
+        for (int col = 0; col < cols; col++) {
+            int source_col = cols == 1 ? 2 : col;
             for (int row = 0; row < 7; row++) {
-                if (!(g[col] & (1 << row))) {
+                if (!(g[source_col] & (1 << row))) {
                     continue;
                 }
                 lv_area_t a;
@@ -278,6 +291,7 @@ static void dot_draw_cb(lv_event_t *e)
                 lv_draw_rect(dc, &rd, &a);
             }
         }
+        gx += cols * d->dot + (cols - 1) * d->gap + d->gap * 2;
     }
 }
 
@@ -529,11 +543,13 @@ static void icon_draw_cb(lv_event_t *e)
         lv_draw_line(dc, &ld, &c1, &d1);
         break;
     }
+    case RK_ICON_BACK:
     case RK_ICON_CHEVRON: {
-        lv_point_t a = {cx - s * 8 / 100, cy - s * 24 / 100};
-        lv_point_t b = {cx + s * 14 / 100, cy};
-        lv_point_t c1 = {cx + s * 14 / 100, cy};
-        lv_point_t d1 = {cx - s * 8 / 100, cy + s * 24 / 100};
+        int sign=kind==RK_ICON_BACK?-1:1;
+        lv_point_t a = {cx - sign*s * 8 / 100, cy - s * 24 / 100};
+        lv_point_t b = {cx + sign*s * 14 / 100, cy};
+        lv_point_t c1 = {cx + sign*s * 14 / 100, cy};
+        lv_point_t d1 = {cx - sign*s * 8 / 100, cy + s * 24 / 100};
         lv_draw_line(dc, &ld, &a, &b);
         lv_draw_line(dc, &ld, &c1, &d1);
         break;
@@ -676,9 +692,17 @@ void rk_task_exit(void)
 }
 
 /* ------------------------------------------------------------ 页面骨架 */
+static void page_close_async(void *ud)
+{
+    rk_page_t *p=ud;
+    if(p->closing)rk_page_close(p);
+}
+
 static void page_close_cb(void *ud)
 {
-    rk_page_close((rk_page_t *)ud);
+    rk_page_t *p=ud;
+    if(p->back_cb){p->back_cb(p->back_ud);return;}
+    if(!p->closing){p->closing=true;lv_async_call(page_close_async,p);}
 }
 
 bool rk_page_is_open(const rk_page_t *p)
@@ -691,6 +715,7 @@ void rk_page_open(rk_page_t *p, lv_obj_t *parent, const char *title)
     if (!p || !parent) {
         return;
     }
+    if(p->root)rk_page_close(p);
     memset(p, 0, sizeof(*p));
     const rk_theme_t *th = rk_theme();
 
@@ -707,32 +732,27 @@ void rk_page_open(rk_page_t *p, lv_obj_t *parent, const char *title)
     lv_label_set_text(p->title, title ? title : "");
     lv_obj_set_style_text_font(p->title, RK_FONT_BODY, 0);
     lv_obj_set_style_text_color(p->title, th->ink, 0);
-    lv_obj_set_pos(p->title, 58, 58);
-    lv_obj_set_width(p->title, 96);
+    lv_obj_set_pos(p->title, 108, 86);
+    lv_obj_set_width(p->title, 136);
+    lv_obj_set_style_text_align(p->title,LV_TEXT_ALIGN_CENTER,0);
     lv_label_set_long_mode(p->title, LV_LABEL_LONG_DOT);
     lv_obj_clear_flag(p->title, LV_OBJ_FLAG_CLICKABLE);
 
-    /* 关闭键：44×44 圆形按钮，不能再用浮图标。
-     * 原来是 34px 裸图标贴 (274,58)：环线在 y=58 处只到 x≈289，图标右半截连同
-     * 命中区一起坐在圆屏黑角上，手指按过去时大半落在纯黑区域 —— 这就是「难点到」。
-     * 现在给圆底（让可点范围可见）、往里收到 232，中心离屏幕右沿 80px，
-     * 完全落在圆内；命中面积 44² 比原来 34² 大 67%。
-     * y 收到 43：底边 86 与 y=90 的分隔线留 4px 间隙，不让线从按钮底下穿出来；
-     * 右上角 (276,43) 到圆心 167px，仍在环内。
-     * 底色取 muted 的 27%（mix 70）：再亮一档就成整页最重的色块，抢过标题。 */
-    lv_obj_t *close = rk_round_btn(p->root, 232, 43, 44, RK_ICON_CLOSE,
+    /* Keep the header below the platform capture strip (y < 70). */
+    lv_obj_t *close = rk_round_btn(p->root, 60, 74, 40, RK_ICON_BACK,
                                    lv_color_mix(th->muted, th->bg, 70), th->muted);
     sdgoods_tap_bind(close, &p->close_ctx, page_close_cb, p);
+    p->back=close;
 
-    rk_hairline(p->root, 58, 90, 244, th->hair);
+    rk_hairline(p->root, 60, 118, 240, th->hair);
 
     p->body = lv_obj_create(p->root);
     lv_obj_remove_style_all(p->body);
-    lv_obj_set_pos(p->body, 52, 100);
+    lv_obj_set_pos(p->body, 60, 124);
     /* 176 只能露 3.6 行（48px/行）——设置页第 5 项要滚动才能看到，而圆屏上
      * 根本没有「这页可以滚」的提示。放到 200：4 整行 + 第 5 行露出小半截，
      * 下半圆的弦宽在 y=300 处仍有 134px，内容不会被圆角切掉。 */
-    lv_obj_set_size(p->body, 256, 200);
+    lv_obj_set_size(p->body, 240, 180);
     lv_obj_set_flex_flow(p->body, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(p->body, 0, 0);
     lv_obj_set_style_pad_row(p->body, 0, 0);
@@ -741,6 +761,7 @@ void rk_page_open(rk_page_t *p, lv_obj_t *parent, const char *title)
     lv_obj_add_flag(p->body, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_move_foreground(p->root);
+    sdgoods_cc_bind(p->root);
 }
 
 void rk_page_close(rk_page_t *p)
@@ -752,7 +773,11 @@ void rk_page_close(rk_page_t *p)
     p->root = NULL;
     p->body = NULL;
     p->title = NULL;
+    p->back = NULL;
     p->rows = 0;
+    p->closing=false;
+    p->back_cb=NULL;
+    p->back_ud=NULL;
 }
 
 void rk_page_action(rk_page_t *p, const char *text, sdgoods_tap_ctx_t *ctx,
@@ -764,8 +789,8 @@ void rk_page_action(rk_page_t *p, const char *text, sdgoods_tap_ctx_t *ctx,
     const rk_theme_t *th = rk_theme();
     lv_obj_t *b = lv_obj_create(p->root);
     lv_obj_remove_style_all(b);
-    lv_obj_set_pos(b, 160, 56);
-    lv_obj_set_size(b, 56, 26);
+    lv_obj_set_pos(b, 244, 74);
+    lv_obj_set_size(b, 56, 40);
     lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_radius(b, 13, 0);
@@ -797,9 +822,42 @@ void rk_page_row(rk_page_t *p, const char *label, const char *value,
 void rk_page_row_net(rk_page_t *p, const char *label, const char *value,
                      sdgoods_tap_ctx_t *ctx, sdgoods_tap_cb_t cb, void *ud)
 {
-    /* 网络台名：字形必须走 net_font_20（GB2312 一级字库），否则缺字变 '?'。
-     * 字大一号⇒左边得让出位置给右侧码率 + chevron，否则两者叠在一起。 */
-    page_row_impl(p, label, value, ctx, cb, ud, RK_FONT_TITLE, 160, 13, 48);
+    if (!p || !p->body) return;
+    const rk_theme_t *th = rk_theme();
+    lv_obj_t *row = lv_obj_create(p->body);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), 48);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_radius(row, 10, 0);
+    lv_obj_set_style_bg_color(row, th->card, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_STATE_PRESSED);
+
+    /* Full station name above metadata; separate bands cannot overlap. */
+    lv_obj_t *name = lv_label_create(row);
+    lv_obj_set_style_text_font(name, RK_FONT_TITLE, 0);
+    lv_obj_set_style_text_color(name, th->ink, 0);
+    lv_obj_set_size(name, 204, 26);
+    lv_obj_set_pos(name, 10, 1);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_anim_speed(name, 24, 0);
+    lv_label_set_text(name, label ? label : "");
+    lv_obj_clear_flag(name, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *meta = lv_label_create(row);
+    lv_obj_set_style_text_font(meta, RK_FONT_SMALL, 0);
+    lv_obj_set_style_text_color(meta, th->muted, 0);
+    lv_obj_set_size(meta, 204, 18);
+    lv_obj_set_pos(meta, 10, 28);
+    lv_label_set_long_mode(meta, LV_LABEL_LONG_DOT);
+    lv_label_set_text(meta, value ? value : "");
+    lv_obj_clear_flag(meta, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t *arrow = rk_icon(row, 16, RK_ICON_CHEVRON, th->muted);
+    lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -6, 0);
+    rk_hairline(row, 10, 47, 220, th->hair);
+    sdgoods_tap_bind(row, ctx, cb, ud);
+    p->rows++;
 }
 
 void rk_page_row_compact(rk_page_t *p, const char *label, const char *value,
@@ -807,7 +865,7 @@ void rk_page_row_compact(rk_page_t *p, const char *label, const char *value,
 {
     /* 设置页专用：5 行 × 40px = 200px 正好塞进 body，不需要滚动。
      * 圆屏上「能滚」是不可见的，把内容藏到折行外就等于用户找不到。 */
-    page_row_impl(p, label, value, ctx, cb, ud, RK_FONT_BODY, 110, 10, 40);
+    page_row_impl(p, label, value, ctx, cb, ud, RK_FONT_BODY, 100, 8, 36);
 }
 
 static void page_row_impl(rk_page_t *p, const char *label, const char *value,

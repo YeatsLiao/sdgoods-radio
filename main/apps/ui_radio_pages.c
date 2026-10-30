@@ -8,7 +8,6 @@
 
 #include "ui_radio_pages.h"
 
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,11 +18,14 @@
 #include "radio_catalog.h"
 #include "sdgoods_lcd.h"
 #include "ui_radio_kit.h"
+#include "ui_radio_skin.h"
+#include "sdgoods_i18n.h"
+#include "sdgoods_cc.h"
 #include "wifi_prov.h"
 
 static const char *TAG = "UI_RADIO_PG";
 
-#define LIST_SHOW_MAX   40
+#define LIST_SHOW_MAX   3
 #define WIFI_MAX_NETS   12
 
 static const radio_pages_ctl_t *s_ctl;
@@ -33,6 +35,16 @@ static rk_page_t s_set;
 static rk_page_t s_pick;
 static rk_page_t s_wifi;
 static rk_page_t s_wifi_pw;
+static lv_obj_t *s_skin_page, *s_skin_art, *s_skin_title, *s_skin_name, *s_skin_note;
+static int s_skin_candidate;
+static sdgoods_tap_ctx_t s_skin_ctx[4];
+static sdgoods_tap_ctx_t s_list_nav_ctx[2];
+static int s_list_offset;
+static bool s_list_owned, s_list_queued;
+static int s_list_direction;
+static bool s_list_loading;
+static lv_obj_t *s_wifi_value;
+static wifi_prov_state_t s_wifi_displayed;
 
 /* 位移守卫上下文：由调用方静态存储，生命周期覆盖对应对象 */
 static sdgoods_tap_ctx_t s_list_ctx[LIST_SHOW_MAX];
@@ -43,8 +55,12 @@ static sdgoods_tap_ctx_t s_head_ctx[4];
 static sdgoods_tap_ctx_t s_pw_ctx[1];
 
 static lv_obj_t *s_pw_ta;
+static lv_obj_t *s_pw_status;
 static lv_obj_t *s_pw_kb;    /* 圆屏软键盘容器（定义在下方键盘小节，detach 时要置空） */
 static char      s_pw_ssid[33];
+static unsigned s_pw_epoch;
+static lv_obj_t *s_pw_visibility_label;
+static sdgoods_tap_ctx_t s_pw_visibility_ctx;
 
 /* WiFi 扫描交接（任务 → tick） */
 static char          s_nets[WIFI_MAX_NETS][33];
@@ -53,6 +69,7 @@ static volatile int  s_scan_cnt = -1;
 static volatile bool s_scan_running;
 static bool          s_scan_listed;
 static bool          s_wait_connect;
+static lv_obj_t *s_wifi_progress;
 
 /* 选择器 */
 static void (*s_pick_cb)(int idx);
@@ -60,6 +77,7 @@ static void (*s_pick_cb)(int idx);
 static void radio_pages_open_wifi(lv_obj_t *parent);
 static void radio_pages_open_wifi_pw(lv_obj_t *parent);
 static void pw_kb_build(void);
+static void list_open_at(lv_obj_t *parent, int offset);
 
 void radio_pages_init(const radio_pages_ctl_t *ctl)
 {
@@ -68,15 +86,22 @@ void radio_pages_init(const radio_pages_ctl_t *ctl)
 
 void radio_pages_detach(void)
 {
+    if (s_skin_page) lv_obj_del(s_skin_page);
+    s_skin_page = s_skin_art = s_skin_title = s_skin_name = s_skin_note = NULL;
     rk_page_close(&s_pick);
     rk_page_close(&s_wifi_pw);
     s_pw_ta = NULL;
+    ++s_pw_epoch;
+    s_pw_visibility_label=NULL;
+    s_pw_status=NULL;
     s_pw_kb = NULL;      /* 随页面一起被销毁；不置空则换页的 lv_async_call 会踩野指针 */
     rk_page_close(&s_wifi);
     rk_page_close(&s_set);
+    s_wifi_value=NULL;
     rk_page_close(&s_list);
     s_pick_cb = NULL;
     s_wait_connect = false;
+    s_wifi_progress=NULL;
 }
 
 void radio_pages_close_all(void)
@@ -86,7 +111,7 @@ void radio_pages_close_all(void)
 
 bool radio_pages_any_open(void)
 {
-    return rk_page_is_open(&s_list) || rk_page_is_open(&s_set) ||
+    return s_skin_page || rk_page_is_open(&s_list) || rk_page_is_open(&s_set) ||
            rk_page_is_open(&s_pick) || rk_page_is_open(&s_wifi) ||
            rk_page_is_open(&s_wifi_pw);
 }
@@ -107,7 +132,7 @@ static void list_row_cb(void *ud)
 }
 
 /* ------------------------------------------------------------------ 列表 */
-static void on_list_settings(void *ud)
+static void list_settings_async(void *ud)
 {
     (void)ud;
     radio_pages_close_all();
@@ -117,43 +142,134 @@ static void on_list_settings(void *ud)
     }
 }
 
+static void on_list_settings(void *ud)
+{
+    (void)ud;
+    lv_async_call(list_settings_async, NULL);
+}
+
+static void list_move_async(void *ud)
+{
+    if (!rk_page_is_open(&s_list)) return;
+    int count = s_ctl && s_ctl->count ? s_ctl->count() : 0;
+    int offset = s_list_offset + (int)(intptr_t)ud * LIST_SHOW_MAX;
+    if (offset >= 0 && offset < count) list_open_at(lv_scr_act(), offset);
+}
+
+static void list_move(void *ud) { lv_async_call(list_move_async, ud); }
+static void back_to_list_async(void *ud){(void)ud;list_open_at(lv_scr_act(),s_list_offset);}
+static void back_to_list(void *ud){(void)ud;lv_async_call(back_to_list_async,NULL);}
+static void back_to_settings_async(void *ud){(void)ud;radio_pages_open_settings(lv_scr_act());}
+static void back_to_settings(void *ud){(void)ud;lv_async_call(back_to_settings_async,NULL);}
+
+static void list_gesture_apply(void *arg)
+{
+    s_list_queued=false;
+    if(!rk_page_is_open(&s_list))return;
+    if((int)(intptr_t)arg==2)rk_page_close(&s_list);
+    else list_move_async(arg);
+}
+
+static void list_gesture(lv_event_t *e)
+{
+    lv_event_code_t code=lv_event_get_code(e);
+    if(code==LV_EVENT_PRESSED){s_list_owned=true;s_list_direction=0;}
+    else if(code==LV_EVENT_GESTURE && s_list_owned){
+        lv_indev_t *input=lv_event_get_param(e);
+        if(!input)return;
+        lv_dir_t dir=lv_indev_get_gesture_dir(input);
+        s_list_direction=dir==LV_DIR_LEFT?1:dir==LV_DIR_RIGHT?-1:dir==LV_DIR_TOP?2:0;
+    }else if(code==LV_EVENT_RELEASED){
+        if(s_list_owned && s_list_direction && !s_list_queued){
+            s_list_queued=true;
+            lv_async_call(list_gesture_apply,(void *)(intptr_t)s_list_direction);
+        }
+        s_list_owned=false;
+    }else if(code==LV_EVENT_PRESS_LOST)s_list_owned=false;
+}
+
+static void list_bubble(lv_obj_t *o, lv_obj_t *root)
+{
+    /* Leave the platform's top capture strip in sole ownership of its press. */
+    if(o!=root && lv_obj_get_y(o)==0 && lv_obj_get_height(o)==70 && lv_obj_get_width(o)==360)return;
+    if(o!=root)lv_obj_add_flag(o,LV_OBJ_FLAG_EVENT_BUBBLE|LV_OBJ_FLAG_GESTURE_BUBBLE);
+    for(uint32_t i=0;i<lv_obj_get_child_cnt(o);++i)list_bubble(lv_obj_get_child(o,(int)i),root);
+}
+
 void radio_pages_open_list(lv_obj_t *parent)
+{
+    int current = s_ctl && s_ctl->cur_index ? s_ctl->cur_index() : 0;
+    list_open_at(parent, current > 0 ? current / LIST_SHOW_MAX * LIST_SHOW_MAX : 0);
+}
+
+static void list_open_at(lv_obj_t *parent, int offset)
 {
     if (!parent) {
         return;
     }
     radio_pages_detach();
-    rk_page_open(&s_list, parent, "电台列表");
-    rk_page_action(&s_list, "设置", &s_head_ctx[0], on_list_settings, NULL);
+    rk_page_open(&s_list, parent, SDG_T("电台列表","Stations"));
+    rk_page_action(&s_list, SDG_T("设置","Settings"), &s_head_ctx[0], on_list_settings, NULL);
+    lv_obj_clear_flag(s_list.root,LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_clear_flag(s_list.body,LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_list.root,list_gesture,LV_EVENT_ALL,NULL);
+    s_list_owned=s_list_queued=false;
 
     int n = s_ctl && s_ctl->count ? s_ctl->count() : 0;
+    s_list_loading=s_ctl && s_ctl->loading && s_ctl->loading();
     if (n <= 0) {
-        rk_page_hint(&s_list, "还没有电台\n连上 WiFi 后会自动获取");
+        rk_page_hint(&s_list,s_ctl && s_ctl->loading && s_ctl->loading()?SDG_T("正在获取电台","Loading stations"):
+                     wifi_prov_get_state()==WIFI_STATE_CONNECTED?SDG_T("还没有电台\n请刷新电台","No stations. Refresh to retry."):
+                     SDG_T("连上 WiFi 后会自动获取","Connect Wi-Fi to load stations"));
+        list_bubble(s_list.root,s_list.root);
         return;
     }
-    if (n > LIST_SHOW_MAX) {
-        n = LIST_SHOW_MAX;
-    }
+    s_list_offset = offset >= 0 && offset < n ? offset : 0;
+    lv_obj_set_height(s_list.body, 144);
 
     static char names[LIST_SHOW_MAX][RADIO_NAME_MAX + 4];
-    static char metas[LIST_SHOW_MAX][16];
-    for (int i = 0; i < n; i++) {
+    static char metas[LIST_SHOW_MAX][32];
+    for (int row = 0; row < LIST_SHOW_MAX && s_list_offset + row < n; row++) {
+        int i = s_list_offset + row;
         const radio_station_t *st = radio_catalog_at(i);
         if (!st) {
             break;
         }
-        rk_text_safe(st->name, names[i], sizeof(names[i]), RK_FONT_TITLE);
-        if (names[i][0] == '\0') {
-            snprintf(names[i], sizeof(names[i]), "电台 %d", i + 1);
+        rk_text_safe(st->name, names[row], sizeof(names[row]), RK_FONT_TITLE);
+        if (names[row][0] == '\0') {
+            snprintf(names[row], sizeof(names[row]), SDG_T("电台 %d", "Station %d"), i + 1);
         }
-        if (st->bitrate > 0) {
-            snprintf(metas[i], sizeof(metas[i]), "%uk", (unsigned)st->bitrate);
+        if(st->freq_mhz>0.0f){
+            snprintf(metas[row],sizeof(metas[row]),"FM %.1f MHz",st->freq_mhz);
+        }else if (st->bitrate > 0) {
+            snprintf(metas[row], sizeof(metas[row]), "%uk", (unsigned)st->bitrate);
         } else {
-            metas[i][0] = '\0';
+            metas[row][0] = '\0';
         }
-        rk_page_row_net(&s_list, names[i], metas[i], &s_list_ctx[i], list_row_cb,
+        rk_page_row_net(&s_list, names[row], metas[row], &s_list_ctx[row], list_row_cb,
                         (void *)(intptr_t)i);
     }
+    const rk_theme_t *th = rk_theme();
+    lv_obj_t *prev = rk_round_btn(s_list.root, 76, 276, 44, RK_ICON_BACK, th->card, th->ink);
+    sdgoods_tap_bind(prev, &s_list_nav_ctx[0], list_move, (void *)(intptr_t)-1);
+    if (s_list_offset == 0) lv_obj_add_state(prev, LV_STATE_DISABLED);
+    lv_obj_t *next = rk_round_btn(s_list.root, 240, 276, 44, RK_ICON_CHEVRON, th->card, th->ink);
+    sdgoods_tap_bind(next, &s_list_nav_ctx[1], list_move, (void *)(intptr_t)1);
+    if (s_list_offset + LIST_SHOW_MAX >= n) lv_obj_add_state(next, LV_STATE_DISABLED);
+    lv_obj_t *page = lv_label_create(s_list.root);
+    char page_text[24];
+    snprintf(page_text, sizeof(page_text), "%d / %d", s_list_offset / LIST_SHOW_MAX + 1, (n + LIST_SHOW_MAX - 1) / LIST_SHOW_MAX);
+    lv_label_set_text(page, page_text);
+    lv_obj_set_style_text_font(page, RK_FONT_SMALL, 0);
+    lv_obj_set_style_text_color(page, th->muted, 0);
+    lv_obj_set_style_text_align(page, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(page, 120, 288);
+    lv_obj_set_size(page, 120, 22);
+    lv_obj_t *handle=rk_box(s_list.root,166,336,28,3);
+    lv_obj_set_style_bg_color(handle,th->muted,0);
+    lv_obj_set_style_bg_opa(handle,LV_OPA_50,0);
+    lv_obj_set_style_radius(handle,2,0);
+    list_bubble(s_list.root,s_list.root);
 }
 
 /* ------------------------------------------------------------------ 选择器 */
@@ -191,6 +307,7 @@ static void picker_open(lv_obj_t *parent, const char *title, const char *const *
         rk_page_row(&s_pick, labels[i], marks[i], &s_pick_ctx[i], pick_row_cb,
                     (void *)(intptr_t)i);
     }
+
 }
 
 /* 城市 */
@@ -221,7 +338,7 @@ static void city_picked(int idx)
 
 static void open_city_picker(lv_obj_t *parent)
 {
-    picker_open(parent, "选择城市", CITY_LABELS, CITY_N, city_index(), city_picked);
+    picker_open(parent, SDG_T("选择城市","City"), CITY_LABELS, CITY_N, city_index(), city_picked);
 }
 
 /* 定时 */
@@ -252,7 +369,7 @@ static void sleep_picked(int idx)
 
 static void open_sleep_picker(lv_obj_t *parent)
 {
-    picker_open(parent, "定时休眠", SLEEP_LABELS, SLEEP_N, sleep_index(), sleep_picked);
+    picker_open(parent, SDG_T("定时休眠","Sleep timer"), SLEEP_LABELS, SLEEP_N, sleep_index(), sleep_picked);
 }
 
 /* ------------------------------------------------------------------ 设置 */
@@ -268,14 +385,93 @@ static void set_async_open_sleep(void *a)
     open_sleep_picker(lv_scr_act());
 }
 
+static lv_obj_t *skin_label(lv_obj_t *parent, int x, int y, int w, const char *text)
+{
+    lv_obj_t *o = lv_label_create(parent);
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_size(o, w, 24);
+    lv_obj_set_style_text_font(o, RK_FONT_BODY, 0);
+    lv_obj_set_style_text_align(o, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(o, LV_LABEL_LONG_DOT);
+    lv_label_set_text(o, text);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    return o;
+}
+
+static void skin_render(void)
+{
+    if (!s_skin_page) return;
+    const radio_skin_t *s = radio_skin_get(s_skin_candidate);
+    lv_obj_set_style_bg_color(s_skin_page, lv_color_hex(s->bg), 0);
+    lv_obj_clean(s_skin_art);
+    radio_skin_preview(s_skin_art, s_skin_candidate);
+    char title[40];
+    snprintf(title, sizeof(title), SDG_T("外观 %d / %d", "Style %d / %d"), s_skin_candidate + 1, RADIO_SKIN_COUNT);
+    lv_label_set_text(s_skin_title, title);
+    lv_label_set_text(s_skin_name, radio_skin_name(s_skin_candidate));
+    lv_obj_set_style_text_color(s_skin_title, lv_color_hex(s->ink), 0);
+    lv_obj_set_style_text_color(s_skin_name, lv_color_hex(s->ink), 0);
+    lv_obj_set_style_text_color(s_skin_note, lv_color_hex(s->muted), 0);
+    lv_label_set_text(s_skin_note, s_ctl && s_ctl->skin && s_ctl->skin() == s_skin_candidate
+                      ? SDG_T("当前风格", "Current style") : SDG_T("点应用后保存", "Apply to save"));
+}
+
+static void skin_move_async(void *arg)
+{
+    if (!s_skin_page) return;
+    s_skin_candidate = (s_skin_candidate + (int)(intptr_t)arg + RADIO_SKIN_COUNT) % RADIO_SKIN_COUNT;
+    skin_render();
+}
+
+static void skin_move(void *ud) { lv_async_call(skin_move_async, ud); }
+static void skin_cancel_async(void *ud) { (void)ud; radio_pages_open_settings(lv_scr_act()); }
+static void skin_cancel(void *ud) { (void)ud; lv_async_call(skin_cancel_async, NULL); }
+
+static void skin_apply_async(void *ud)
+{
+    (void)ud;
+    if (!s_skin_page || !s_ctl || !s_ctl->set_skin) return;
+    int candidate = s_skin_candidate;
+    if (!s_ctl->set_skin(candidate)) {
+        radio_pages_detach();
+        rk_page_open(&s_set, lv_scr_act(), SDG_T("保存失败", "Save failed"));
+        rk_page_hint(&s_set, SDG_T("保存失败，请重试", "Save failed. Try again."));
+    }
+}
+
+static void skin_apply(void *ud) { (void)ud; lv_async_call(skin_apply_async, NULL); }
+
 static void set_async_theme(void *a)
 {
     (void)a;
-    bool night = !rk_theme_is_night();
     radio_pages_detach();
-    if (s_ctl && s_ctl->set_night) {
-        s_ctl->set_night(night);
-    }
+    s_skin_candidate = s_ctl && s_ctl->skin ? s_ctl->skin() : RADIO_SKIN_DEFAULT;
+    s_skin_page = rk_box(lv_scr_act(), 0, 0, 360, 360);
+    lv_obj_set_style_bg_opa(s_skin_page, LV_OPA_COVER, 0);
+    lv_obj_add_flag(s_skin_page, LV_OBJ_FLAG_CLICKABLE);
+    s_skin_art = rk_box(s_skin_page, 0, 0, 360, 360);
+    lv_obj_set_y(s_skin_art,16);
+    s_skin_title = skin_label(s_skin_page, 108, 86, 136, "");
+    lv_obj_t *back = rk_round_btn(s_skin_page,60,74,40,RK_ICON_BACK,
+                                lv_color_hex(0x30343B),lv_color_white());
+    sdgoods_tap_bind(back, &s_skin_ctx[0], skin_cancel, NULL);
+    s_skin_name = skin_label(s_skin_page, 60, 242, 240, "");
+    lv_obj_set_style_text_font(s_skin_name, RK_FONT_TITLE, 0);
+    s_skin_note = skin_label(s_skin_page, 60, 230, 240, "");
+    lv_obj_set_height(s_skin_note, 18);
+    lv_obj_add_flag(s_skin_note, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_text_font(s_skin_note, RK_FONT_SMALL, 0);
+    lv_obj_t *prev = rk_round_btn(s_skin_page, 76, 276, 44, RK_ICON_BACK,
+                                 lv_color_hex(0x30343B), lv_color_white());
+    sdgoods_tap_bind(prev, &s_skin_ctx[1], skin_move, (void *)(intptr_t)-1);
+    lv_obj_t *apply = rk_pill(s_skin_page, 132, 276, 96, 44, SDG_T("应用", "Apply"),
+                              lv_color_hex(0x30343B), lv_color_white());
+    sdgoods_tap_bind(apply, &s_skin_ctx[2], skin_apply, NULL);
+    lv_obj_t *next = rk_round_btn(s_skin_page, 240, 276, 44, RK_ICON_CHEVRON,
+                                 lv_color_hex(0x30343B), lv_color_white());
+    sdgoods_tap_bind(next, &s_skin_ctx[3], skin_move, (void *)(intptr_t)1);
+    skin_render();
+    sdgoods_cc_bind(s_skin_page);
 }
 
 static void set_async_refresh(void *a)
@@ -300,40 +496,45 @@ static void set_theme_cb(void *ud)   { (void)ud; lv_async_call(set_async_theme, 
 static void set_refresh_cb(void *ud) { (void)ud; lv_async_call(set_async_refresh, NULL); }
 static void set_wifi_cb(void *ud)    { (void)ud; lv_async_call(set_async_wifi, NULL); }
 
+static const char *wifi_state_label(wifi_prov_state_t state)
+{
+    switch(state){
+    case WIFI_STATE_CONNECTED:return SDG_T("已连接","Connected");
+    case WIFI_STATE_CONNECTING:return SDG_T("连接中","Connecting");
+    case WIFI_STATE_SETUP:return SDG_T("待配网","Setup");
+    default:return SDG_T("连接失败","Failed");
+    }
+}
+
 void radio_pages_open_settings(lv_obj_t *parent)
 {
     if (!parent) {
         return;
     }
     radio_pages_detach();
-    rk_page_open(&s_set, parent, "设置");
+    rk_page_open(&s_set, parent, SDG_T("设置","Settings"));
+    s_set.back_cb=back_to_list;
 
     char sleep_buf[24];
     int sm = (s_ctl && s_ctl->sleep_min) ? s_ctl->sleep_min() : 0;
     if (sm <= 0) {
-        snprintf(sleep_buf, sizeof(sleep_buf), "关闭");
+        snprintf(sleep_buf, sizeof(sleep_buf), "%s",SDG_T("关闭","Off"));
     } else {
-        snprintf(sleep_buf, sizeof(sleep_buf), "%d 分钟", sm);
+        snprintf(sleep_buf, sizeof(sleep_buf), SDG_T("%d 分钟","%d min"), sm);
     }
 
-    const char *wifi = "未连接";
-    if (wifi_prov_get_state() == WIFI_STATE_CONNECTED) {
-        wifi = "已连接";
-    } else if (wifi_prov_is_setup_mode()) {
-        wifi = "待配网";
-    }
+    s_wifi_displayed=wifi_prov_get_state();
+    const char *wifi=wifi_state_label(s_wifi_displayed);
 
-    /* 顺序按「多久用一次」排：配网 / 换城市是配置期低频但**必须在首屏**（不然要滚动），
-     * 主题 / 休眠 / 刷新次之。用 40px 紧凑行：5 行 × 40 = 200px 正好落在圆屏可视区内，
-     * 不需要滚动 —— 圆屏上没有「这页能滚」的提示，藏到折行外等于用户找不到。
-     * 也没有「返回」行：页头 ✕ 就能关。 */
-    rk_page_row_compact(&s_set, "WiFi 配网", wifi, &s_set_ctx[4], set_wifi_cb, NULL);
-    rk_page_row_compact(&s_set, "城市", s_ctl && s_ctl->city ? s_ctl->city() : "自动定位",
+    /* Five visible rows; the header back arrow returns to the station list. */
+    rk_page_row_compact(&s_set, SDG_T("WiFi 配网","Wi-Fi"), wifi, &s_set_ctx[4], set_wifi_cb, NULL);
+    s_wifi_value=lv_obj_get_child(lv_obj_get_child(s_set.body,0),1);
+    rk_page_row_compact(&s_set, SDG_T("城市","City"), s_ctl && s_ctl->city ? s_ctl->city() : SDG_T("自动定位","Auto"),
                         &s_set_ctx[0], set_city_cb, NULL);
-    rk_page_row_compact(&s_set, "主题", rk_theme_is_night() ? "夜色" : "纸张",
+    rk_page_row_compact(&s_set, SDG_T("外观", "Appearance"), radio_skin_name(s_ctl && s_ctl->skin ? s_ctl->skin() : RADIO_SKIN_DEFAULT),
                         &s_set_ctx[1], set_theme_cb, NULL);
-    rk_page_row_compact(&s_set, "定时休眠", sleep_buf, &s_set_ctx[2], set_sleep_cb, NULL);
-    rk_page_row_compact(&s_set, "刷新电台", NULL, &s_set_ctx[3], set_refresh_cb, NULL);
+    rk_page_row_compact(&s_set, SDG_T("定时休眠","Sleep"), sleep_buf, &s_set_ctx[2], set_sleep_cb, NULL);
+    rk_page_row_compact(&s_set, SDG_T("刷新电台","Refresh"), NULL, &s_set_ctx[3], set_refresh_cb, NULL);
 }
 
 /* ------------------------------------------------------------------ WiFi */
@@ -361,10 +562,10 @@ static void wifi_start_scan(void)
     }
 }
 
-static void wifi_net_cb(void *ud)
+static void wifi_net_async(void *ud)
 {
     int i = (int)(intptr_t)ud;
-    if (i < 0 || i >= WIFI_MAX_NETS) {
+    if (i < 0 || i >= s_scan_cnt || !rk_page_is_open(&s_wifi)) {
         return;
     }
     snprintf(s_pw_ssid, sizeof(s_pw_ssid), "%s", s_nets[i]);
@@ -374,6 +575,9 @@ static void wifi_net_cb(void *ud)
     }
     radio_pages_open_wifi_pw(lv_scr_act());
 }
+static void wifi_net_cb(void *ud){lv_async_call(wifi_net_async,ud);}
+static void wifi_back_scan_async(void *ud){(void)ud;radio_pages_detach();radio_pages_open_wifi(lv_scr_act());}
+static void wifi_back_scan(void *ud){(void)ud;lv_async_call(wifi_back_scan_async,NULL);}
 
 static void wifi_fill_list(void)
 {
@@ -403,104 +607,95 @@ static void wifi_rescan_cb(void *ud)
     wifi_start_scan();
 }
 
+static void wifi_wait_async(void *ud)
+{
+    (void)ud;
+    radio_pages_detach();
+    rk_page_open(&s_wifi,lv_scr_act(),SDG_T("WiFi 配网","Wi-Fi"));
+    s_wifi.back_cb=back_to_settings;
+    rk_page_hint(&s_wifi,SDG_T("连接中","Connecting"));
+    s_wifi_progress=lv_obj_get_child(s_wifi.body,0);
+    s_wait_connect=true;
+}
+
 static void wifi_connect_cb(void *ud)
 {
     (void)ud;
     const char *pass = s_pw_ta ? lv_textarea_get_text(s_pw_ta) : "";
-    wifi_prov_submit(s_pw_ssid, pass);
-    s_wait_connect = true;
-    radio_pages_detach();
+    esp_err_t err=wifi_prov_submit(s_pw_ssid,pass);
+    if(err==ESP_OK)lv_async_call(wifi_wait_async,NULL);
+    else if(s_pw_status)lv_label_set_text(s_pw_status,SDG_T("连接失败，请重试","Request failed. Try again."));
 }
 
-/* ================================================================== 圆屏软键盘
- *
- * 为什么不用 lv_keyboard：它是矩形栅格，会铺满整个控件宽度。屏幕是 360 圆，
- * 底部几行的左右两端落在圆外 —— 那些键看得见摸不到（用户反馈「按键按不到」），
- * 键盘底边的字母还会被圆弧切掉一半（「字体超出圆屏」）。
- *
- * 这里的做法：行数固定 4 行，**每行的可用宽度按该行底边的弦宽算**，
- * 行内按键均分并水平居中 —— 越往下行越窄，键盘自然形成一个梯形，整体落在圆内。
- *
- *   弦宽公式（圆心 180,180，半径 180）：w(y) = 2·√(180² - (y-180)²)
- *   行底 y=202 → 359px；y=239 → 340；y=276 → 304；y=313 → 242
- */
-#define PW_CY        180     /* 圆心 y（x 方向靠居中对称，不需要 cx） */
-#define PW_R         180
-#define PW_EDGE      10      /* 距圆边留白：弧线处触摸端点抖动大，贴边容易按空 */
-#define PW_ROW_Y     168     /* 第一行顶边 */
-#define PW_ROW_H     34
-#define PW_ROW_GAP   3
-#define PW_KEY_GAP   3
-#define PW_ROWS      3       /* 字母/数字共 3 行，底行单独排（空格 + 连接） */
-#define PW_KEY_MAX   40
+/* Central keyboard: a fixed 5x3 grid, two alphabet pages, three symbol pages.
+ * All keys stay away from the unreliable outer touch ring. Credentials live
+ * in the textarea and survive page, case and character-set changes. */
+#define PW_GRID_X       60
+#define PW_GRID_Y       168
+#define PW_COLS         5
+#define PW_ROWS         3
+#define PW_KEY_W        44
+#define PW_KEY_H        34
+#define PW_COL_GAP      5
+#define PW_ROW_GAP      4
+#define PW_TEXT_KEYS    13
+#define PW_ACTION_X     90
+#define PW_ACTION_Y     284
+#define PW_ACTION_W     42
+#define PW_ACTION_H     30
+#define PW_ACTION_GAP   4
+#define PW_KEY_MAX      19
 
-/* 特殊键码：控制字符当按键用，避免与 WiFi 5~63 位可打印 ASCII 密码冲突 */
-#define PW_K_SYM     0x01    /* 切到数字/符号页 */
-#define PW_K_DEL     0x02    /* 退格 */
-#define PW_K_ABC     0x03    /* 切回字母页 */
+#define PW_K_MODE       0x01
+#define PW_K_DEL        0x02
+#define PW_K_NEXT       0x03
+#define PW_K_CASE       0x04
 
-static const char *const PW_ROWS_ABC[PW_ROWS] = {
-    "qwertyuiop",
-    "asdfghjkl",
-    "\x01zxcvbnm\x02",
-};
-static const char *const PW_ROWS_NUM[PW_ROWS] = {
-    "1234567890",
-    "-_.,:;@#!?",
-    "\x03()/+*=&%\x02",
-};
+static const char PW_ABC[] = "qwertyuiopasdfghjklzxcvbnm";
+static const char PW_NUM[] = "1234567890";
+static const char PW_SYM[] = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+static int s_pw_mode, s_pw_page;
+static bool s_pw_upper, s_pw_rebuild_pending;
+static char s_kb_ch[PW_KEY_MAX];
+static sdgoods_tap_ctx_t s_kb_ctx[PW_KEY_MAX];
+static struct { unsigned epoch; char action; } s_pw_job;
 
-static int                s_pw_mode;  /* 0 = 字母，1 = 数字/符号 */
-static char               s_kb_ch[PW_KEY_MAX];
-static sdgoods_tap_ctx_t  s_kb_ctx[PW_KEY_MAX];
-
-/* 该行底边处的可用宽度（圆内），再扣掉两侧留白 */
-static lv_coord_t pw_row_w(lv_coord_t y_top, lv_coord_t h)
+static const char *pw_charset(void)
 {
-    int dy = (int)(y_top + h) - PW_CY;   /* 行底离圆心更远 ⇒ 更窄，取它当约束 */
-    if (dy < 0) {
-        dy = -dy;
-    }
-    if (dy >= PW_R) {
-        return 0;
-    }
-    float half = sqrtf((float)(PW_R * PW_R - dy * dy)) - (float)PW_EDGE;
-    if (half < 60.0f) {
-        half = 60.0f;                    /* 兜底：极端情况下也不至于算出负宽 */
-    }
-    return (lv_coord_t)(half * 2.0f);
+    return s_pw_mode==0?PW_ABC:s_pw_mode==1?PW_NUM:PW_SYM;
 }
 
-static void pw_switch_page(void *p)
+static int pw_page_count(void)
 {
-    s_pw_mode = (int)(intptr_t)p;
+    return ((int)strlen(pw_charset())+PW_TEXT_KEYS-1)/PW_TEXT_KEYS;
+}
+
+static void pw_switch_page(void *unused)
+{
+    (void)unused;
+    s_pw_rebuild_pending=false;
+    if(s_pw_job.epoch!=s_pw_epoch || !s_wifi_pw.root || !s_pw_kb || !s_pw_ta)return;
+    if(s_pw_job.action==PW_K_MODE){s_pw_mode=(s_pw_mode+1)%3;s_pw_page=0;}
+    else if(s_pw_job.action==PW_K_NEXT)s_pw_page=(s_pw_page+1)%pw_page_count();
+    else if(s_pw_job.action==PW_K_CASE){
+        if(s_pw_mode==0)s_pw_upper=!s_pw_upper;
+        else{s_pw_mode=0;s_pw_page=0;}
+    }
     pw_kb_build();
 }
 
 static void pw_key_any(void *ud)
 {
-    if (!s_pw_ta) {
-        return;
-    }
-    int idx = (int)(intptr_t)ud;
-    if (idx < 0 || idx >= PW_KEY_MAX) {
-        return;
-    }
-    char c = s_kb_ch[idx];
-    switch (c) {
-    case PW_K_SYM:
-    case PW_K_ABC:
-        /* 换页会重建整块键盘（= 删掉正在处理本事件的按键），必须推迟到
-         * 事件派发结束后再做，否则 LVGL 还在遍历已销毁的对象。 */
-        lv_async_call(pw_switch_page, (void *)(intptr_t)(c == PW_K_SYM ? 1 : 0));
-        break;
-    case PW_K_DEL:
-        lv_textarea_del_char(s_pw_ta);
-        break;
-    default:
-        lv_textarea_add_char(s_pw_ta, (uint32_t)(uint8_t)c);
-        break;
-    }
+    if(!s_pw_ta || !s_wifi_pw.root)return;
+    int idx=(int)(intptr_t)ud;
+    if(idx<0 || idx>=PW_KEY_MAX || s_pw_rebuild_pending)return;
+    char c=s_kb_ch[idx];
+    if(c==PW_K_MODE || c==PW_K_NEXT || c==PW_K_CASE){
+        /* Rebuild only after event dispatch. Epoch rejects old queued jobs. */
+        s_pw_job.epoch=s_pw_epoch;s_pw_job.action=c;s_pw_rebuild_pending=true;
+        if(lv_async_call(pw_switch_page,NULL)!=LV_RES_OK)s_pw_rebuild_pending=false;
+    }else if(c==PW_K_DEL)lv_textarea_del_char(s_pw_ta);
+    else if(c)lv_textarea_add_char(s_pw_ta,(uint32_t)(uint8_t)c);
 }
 
 static lv_obj_t *pw_key(lv_obj_t *parent, lv_coord_t x, lv_coord_t y, lv_coord_t w, lv_coord_t h,
@@ -522,75 +717,59 @@ static lv_obj_t *pw_key(lv_obj_t *parent, lv_coord_t x, lv_coord_t y, lv_coord_t
     return k;
 }
 
-/* 重建整块键盘（首次打开 / 字母↔数字切换） */
+static void pw_bind_key(lv_obj_t *key,int slot,char code)
+{
+    s_kb_ch[slot]=code;
+    sdgoods_tap_bind(key,&s_kb_ctx[slot],pw_key_any,(void *)(intptr_t)slot);
+}
+
+static void pw_visibility(void *unused)
+{
+    (void)unused;
+    if(!s_pw_ta || !s_pw_visibility_label)return;
+    bool hidden=!lv_textarea_get_password_mode(s_pw_ta);
+    lv_textarea_set_password_mode(s_pw_ta,hidden);
+    lv_label_set_text(s_pw_visibility_label,hidden?SDG_T("显示","Show"):SDG_T("隐藏","Hide"));
+}
+
 static void pw_kb_build(void)
 {
-    if (!s_pw_kb || !s_wifi_pw.root) {
-        return;
-    }
+    if(!s_pw_kb || !s_wifi_pw.root)return;
     lv_obj_clean(s_pw_kb);
-
-    const rk_theme_t *th = rk_theme();
-    const char *const *rows = s_pw_mode ? PW_ROWS_NUM : PW_ROWS_ABC;
-    int n = 0;
-
-    for (int r = 0; r < PW_ROWS; r++) {
-        const char *s = rows[r];
-        int cnt = (int)strlen(s);
-        if (cnt <= 0) {
-            continue;
-        }
-        lv_coord_t y = PW_ROW_Y + r * (PW_ROW_H + PW_ROW_GAP);
-        lv_coord_t avail = pw_row_w(y, PW_ROW_H);
-        lv_coord_t kw = (avail - (cnt - 1) * PW_KEY_GAP) / cnt;
-        lv_coord_t total = kw * cnt + (cnt - 1) * PW_KEY_GAP;
-        lv_coord_t x = (LCD_WIDTH - total) / 2;
-
-        for (int i = 0; i < cnt && n < PW_KEY_MAX; i++, n++) {
-            char c = s[i];
-            char one[2] = {c, '\0'};
-            const char *label = one;
-            if (c == PW_K_SYM) {
-                label = "1#";
-            } else if (c == PW_K_DEL) {
-                label = "DEL";
-            } else if (c == PW_K_ABC) {
-                label = "AB";
-            }
-            bool fn = (c == PW_K_SYM || c == PW_K_DEL || c == PW_K_ABC);
-            lv_obj_t *k = pw_key(s_pw_kb, x + i * (kw + PW_KEY_GAP), y, kw, PW_ROW_H, label,
-                                 fn ? th->bg : th->card, fn ? th->muted : th->ink);
-            s_kb_ch[n] = c;
-            sdgoods_tap_bind(k, &s_kb_ctx[n], pw_key_any, (void *)(intptr_t)n);
-        }
+    memset(s_kb_ch,0,sizeof(s_kb_ch));
+    const rk_theme_t *th=rk_theme();
+    const char *chars=pw_charset();
+    int length=(int)strlen(chars);
+    if(s_pw_page>=pw_page_count())s_pw_page=0;
+    for(int slot=0;slot<15;++slot){
+        int offset=s_pw_page*PW_TEXT_KEYS+slot;
+        char c=0;
+        const char *text=NULL;
+        char one[2]={0,0};
+        if(slot==13){c=PW_K_MODE;text=s_pw_mode==0?"123":s_pw_mode==1?"#+=":"ABC";}
+        else if(slot==14){c=PW_K_DEL;text="DEL";}
+        else if(offset<length){
+            c=chars[offset];
+            if(s_pw_mode==0 && s_pw_upper)c=(char)(c-'a'+'A');
+            one[0]=c;text=one;
+        }else continue;
+        bool fn=slot>=13;
+        lv_obj_t *k=pw_key(s_pw_kb,PW_GRID_X+(slot%PW_COLS)*(PW_KEY_W+PW_COL_GAP),
+                           PW_GRID_Y+(slot/PW_COLS)*(PW_KEY_H+PW_ROW_GAP),PW_KEY_W,PW_KEY_H,
+                           text,fn?th->bg:th->card,fn?th->muted:th->ink);
+        pw_bind_key(k,slot,c);
     }
-
-    /* 底行：空格 + 连接。底边 y=313，弦宽只有 242px，所以只放两个键 */
-    lv_coord_t y = PW_ROW_Y + PW_ROWS * (PW_ROW_H + PW_ROW_GAP);
-    lv_coord_t avail = pw_row_w(y, PW_ROW_H);
-    lv_coord_t ok_w = 84;
-    lv_coord_t sp_w = avail - ok_w - 8;
-    if (sp_w > 140) {
-        sp_w = 140;
+    /* 页码上限 3 页，但按 int 最大宽度预留，避免 -Wformat-truncation 逐字节推算 */
+    char page[32];snprintf(page,sizeof(page),"%d/%d>",s_pw_page+1,pw_page_count());
+    const char *labels[]={s_pw_upper?"AA":"Aa",page,SDG_T("空格","Space"),SDG_T("连接","Join")};
+    const char codes[]={PW_K_CASE,PW_K_NEXT,' ',0};
+    for(int i=0;i<4;++i){
+        lv_obj_t *k=pw_key(s_pw_kb,PW_ACTION_X+i*(PW_ACTION_W+PW_ACTION_GAP),PW_ACTION_Y,
+                           PW_ACTION_W,PW_ACTION_H,labels[i],i==3?th->ink:th->card,i==3?th->on_accent:th->ink);
+        lv_obj_set_style_text_font(lv_obj_get_child(k,0),RK_FONT_SMALL,0);
+        if(i==3)sdgoods_tap_bind(k,&s_pw_ctx[0],wifi_connect_cb,NULL);
+        else pw_bind_key(k,15+i,codes[i]);
     }
-    lv_coord_t total = sp_w + 8 + ok_w;
-    lv_coord_t x = (LCD_WIDTH - total) / 2;
-
-    lv_obj_t *sp = pw_key(s_pw_kb, x, y, sp_w, PW_ROW_H, "", th->card, th->ink);
-    /* 空格键不写字：画一条短横线居中，比一排下划线干净 */
-    lv_obj_t *bar = rk_box(sp, (sp_w - 28) / 2, PW_ROW_H / 2 - 1, 28, 2);
-    lv_obj_set_style_radius(bar, 1, 0);
-    lv_obj_set_style_bg_color(bar, th->muted, 0);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-
-    if (n < PW_KEY_MAX) {
-        s_kb_ch[n] = ' ';
-        sdgoods_tap_bind(sp, &s_kb_ctx[n], pw_key_any, (void *)(intptr_t)n);
-        n++;
-    }
-
-    lv_obj_t *ok = pw_key(s_pw_kb, x + sp_w + 8, y, ok_w, PW_ROW_H, "连接", th->ink, th->on_accent);
-    sdgoods_tap_bind(ok, &s_pw_ctx[0], wifi_connect_cb, NULL);
 }
 
 static void radio_pages_open_wifi_pw(lv_obj_t *parent)
@@ -599,25 +778,32 @@ static void radio_pages_open_wifi_pw(lv_obj_t *parent)
         return;
     }
     rk_page_close(&s_wifi_pw);
-    rk_page_open(&s_wifi_pw, parent, "输入密码");
+    rk_page_open(&s_wifi_pw, parent, SDG_T("输入密码","Password"));
+    s_wifi_pw.back_cb=wifi_back_scan;
+    ++s_pw_epoch;
+    rk_page_action(&s_wifi_pw,SDG_T("显示","Show"),&s_pw_visibility_ctx,pw_visibility,NULL);
+    lv_obj_t *visibility=lv_obj_get_child(s_wifi_pw.root,-1);
+    s_pw_visibility_label=lv_obj_get_child(visibility,0);
 
     const rk_theme_t *th = rk_theme();
     lv_obj_t *ssid = lv_label_create(s_wifi_pw.root);
+    s_pw_status=ssid;
     lv_label_set_text(ssid, s_pw_ssid);
     lv_obj_set_style_text_font(ssid, RK_FONT_SMALL, 0);
     lv_obj_set_style_text_color(ssid, th->muted, 0);
-    lv_obj_set_pos(ssid, 58, 96);
-    lv_obj_set_size(ssid, 244, 18);
+    lv_obj_set_pos(ssid, 70, 118);
+    lv_obj_set_size(ssid, 220, 18);
     lv_label_set_long_mode(ssid, LV_LABEL_LONG_DOT);
     lv_obj_clear_flag(ssid, LV_OBJ_FLAG_CLICKABLE);
 
     s_pw_ta = lv_textarea_create(s_wifi_pw.root);
-    lv_obj_set_size(s_pw_ta, 244, 38);
-    lv_obj_set_pos(s_pw_ta, 58, 112);
+    lv_obj_set_size(s_pw_ta, 240, 26);
+    lv_obj_set_pos(s_pw_ta, 60, 138);
+    lv_obj_set_style_pad_all(s_pw_ta,2,0);
     lv_textarea_set_one_line(s_pw_ta, true);
     lv_textarea_set_max_length(s_pw_ta, 64);
     lv_textarea_set_password_mode(s_pw_ta, true);
-    lv_textarea_set_placeholder_text(s_pw_ta, "WiFi 密码");
+    lv_textarea_set_placeholder_text(s_pw_ta, SDG_T("WiFi 密码","Wi-Fi password"));
     lv_obj_set_style_text_font(s_pw_ta, RK_FONT_BODY, 0);
     lv_obj_set_style_bg_color(s_pw_ta, th->card, 0);
     lv_obj_set_style_bg_opa(s_pw_ta, LV_OPA_COVER, 0);
@@ -631,6 +817,8 @@ static void radio_pages_open_wifi_pw(lv_obj_t *parent)
     /* 键盘容器：整屏透明、不吞触摸（按键自己 CLICKABLE，空白处落到 root） */
     s_pw_kb = rk_box(s_wifi_pw.root, 0, 0, LCD_WIDTH, LCD_HEIGHT);
     s_pw_mode = 0;
+    s_pw_page = 0;
+    s_pw_upper = false;
     pw_kb_build();
 }
 
@@ -641,7 +829,8 @@ static void radio_pages_open_wifi(lv_obj_t *parent)
     }
     rk_page_close(&s_wifi);
     rk_page_close(&s_wifi_pw);
-    rk_page_open(&s_wifi, parent, "WiFi 配网");
+    rk_page_open(&s_wifi, parent, SDG_T("WiFi 配网","Wi-Fi"));
+    s_wifi.back_cb=back_to_settings;
     rk_page_action(&s_wifi, "重扫", &s_head_ctx[1], wifi_rescan_cb, NULL);
     rk_page_hint(&s_wifi, "扫描中…");
 
@@ -663,7 +852,23 @@ void radio_pages_open_wifi_page(lv_obj_t *parent)
 
 void radio_pages_tick(void)
 {
-    if (rk_page_is_open(&s_wifi) && s_scan_cnt >= 0 && !s_scan_listed) {
+    if(rk_page_is_open(&s_list)){
+        bool loading=s_ctl && s_ctl->loading && s_ctl->loading();
+        if(s_list_loading && !loading)list_open_at(lv_scr_act(),s_list_offset);
+        else s_list_loading=loading;
+    }
+    if(s_wait_connect && rk_page_is_open(&s_wifi) && s_wifi_progress){
+        lv_label_set_text(s_wifi_progress,wifi_prov_get_state()==WIFI_STATE_FAILED?
+                          SDG_T("连接失败，请返回配网","Failed. Go back to configure."):SDG_T("连接中","Connecting"));
+    }
+    if(rk_page_is_open(&s_set) && s_wifi_value){
+        wifi_prov_state_t state=wifi_prov_get_state();
+        if(state!=s_wifi_displayed){
+            s_wifi_displayed=state;
+            lv_label_set_text(s_wifi_value,wifi_state_label(state));
+        }
+    }
+    if (!s_wait_connect && rk_page_is_open(&s_wifi) && s_scan_cnt >= 0 && !s_scan_listed) {
         s_scan_listed = true;
         wifi_fill_list();
     }

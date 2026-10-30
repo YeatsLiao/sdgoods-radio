@@ -48,4 +48,4 @@ const char *wifi_prov_get_gateway(void);
  * wifi_prov_submit：保存 ssid/pass 到 NVS 并切换 STA 连接（复用配网状态机，含重试）。
  *   连接结果通过 wifi_prov_get_state() 轮询（CONNECTED 即成功）。 */
 int  wifi_prov_scan(char ssids[][33], int8_t rssi[], int max);
-void wifi_prov_submit(const char *ssid, const char *pass);
+esp_err_t wifi_prov_submit(const char *ssid, const char *pass);

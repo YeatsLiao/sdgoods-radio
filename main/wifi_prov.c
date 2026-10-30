@@ -13,6 +13,8 @@
  */
 
 #include "wifi_prov.h"
+#include "wifi_prov_status.h"
+#include <stdatomic.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,10 +43,14 @@ static const char *TAG = "wifi_prov";
 #define AP_MAX_CONN    4
 #define STA_RETRY_MAX  6                 /* 失败重试次数，超出回配网模式 */
 
-static wifi_prov_state_t s_state = WIFI_STATE_SETUP;
+static _Atomic(wifi_prov_state_t) s_state = WIFI_STATE_SETUP;
+static atomic_bool s_connect_pending;
+static atomic_bool s_expected_disconnect;
+static bool s_started;
+static esp_timer_handle_t s_connect_timer, s_retry_timer;
 static char s_ip[16] = "0.0.0.0";
 static char s_ap_ssid[33] = AP_SSID_PREFIX;
-static int  s_retries = 0;
+static atomic_int s_retries;
 static httpd_handle_t s_httpd = NULL;
 static dns_server_handle_t s_dns = NULL;
 static bool s_ap_netif_created = false;
@@ -81,10 +87,10 @@ static esp_err_t nvs_save_creds(const char *ssid, const char *pass, const char *
     if (err != ESP_OK) {
         return err;
     }
-    nvs_set_str(h, KEY_SSID, ssid);
-    nvs_set_str(h, KEY_PASS, pass);
-    nvs_set_str(h, KEY_GW, gw ? gw : "");
-    err = nvs_commit(h);
+    err=nvs_set_str(h, KEY_SSID, ssid);
+    if(err==ESP_OK)err=nvs_set_str(h, KEY_PASS, pass);
+    if(err==ESP_OK)err=nvs_set_str(h, KEY_GW, gw ? gw : "");
+    if(err==ESP_OK)err = nvs_commit(h);
     nvs_close(h);
     return err;
 }
@@ -219,11 +225,11 @@ static const char PAGE_OK[] =
     "<title>已保存</title></head><body style=\"background:#1a1a2e;color:#7ef0a0;"
     "font-family:sans-serif;max-width:420px;margin:48px auto;padding:0 16px\">"
     "<h2>配置已保存，正在连接 WiFi…</h2>"
-    "<p style=\"color:#8fa0c0\">可以关闭本页。若长时间未连上（密码错误），热点会自动重新开启配网。</p>"
+    "<p style=\"color:#8fa0c0\">可以关闭本页。连接失败时，请在设备设置中重新配网。</p>"
     "</body></html>";
 
 /* 前向声明 */
-static void schedule_connect_sta(const char *ssid, const char *pass, const char *gw);
+static esp_err_t schedule_connect_sta(const char *ssid, const char *pass, const char *gw);
 
 static esp_err_t handle_save(httpd_req_t *req)
 {
@@ -233,23 +239,27 @@ static esp_err_t handle_save(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
         return ESP_OK;
     }
-    int r = httpd_req_recv(req, body, len);
-    if (r <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "recv failed");
-        return ESP_OK;
+    int received=0;
+    while(received<len){
+        int r=httpd_req_recv(req,body+received,(size_t)(len-received));
+        if(r<=0){
+            httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"incomplete request body");
+            return ESP_OK;
+        }
+        received+=r;
     }
-    body[r] = '\0';
+    body[received]='\0';
 
     char ssid[33] = {0}, pass[65] = {0}, gw[64] = {0};
     form_field(body, "ssid", ssid, sizeof(ssid));
     form_field(body, "pass", pass, sizeof(pass));
     form_field(body, "gw",   gw,   sizeof(gw));
 
-    /* 密码留空时沿用旧值（方便只改网关 / 换网） */
+    /* A blank password only reuses credentials for the same SSID. */
     if (pass[0] == '\0') {
         char old_ssid[33] = {0}, old_pass[65] = {0}, old_gw[64] = {0};
         if (nvs_load_creds(old_ssid, sizeof(old_ssid), old_pass, sizeof(old_pass),
-                           old_gw, sizeof(old_gw))) {
+                           old_gw, sizeof(old_gw)) && strcmp(ssid,old_ssid)==0) {
             strncpy(pass, old_pass, sizeof(pass) - 1);
         }
     }
@@ -260,15 +270,18 @@ static esp_err_t handle_save(httpd_req_t *req)
     }
     ESP_LOGI(TAG, "save: ssid=%s pass_len=%d gw=%s", ssid, (int)strlen(pass), gw);
 
-    if (nvs_save_creds(ssid, pass, gw) != ESP_OK) {
+    if (atomic_load(&s_connect_pending) || nvs_save_creds(ssid, pass, gw) != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "nvs save failed");
         return ESP_OK;
     }
 
+    if(schedule_connect_sta(ssid,pass,gw)!=ESP_OK){
+        httpd_resp_send_err(req,HTTPD_500_INTERNAL_SERVER_ERROR,"connection could not be scheduled");
+        return ESP_OK;
+    }
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, PAGE_OK, HTTPD_RESP_USE_STRLEN);
     /* 延迟切换 STA：不能在 httpd handler 内 stop 自己（会崩），1.5s 后由定时器执行 */
-    schedule_connect_sta(ssid, pass, gw);
     return ESP_OK;
 }
 
@@ -382,6 +395,8 @@ static void build_ap_config(wifi_config_t *ap_cfg)
 /* 配网模式：SoftAP(APSTA) 开放 + HTTP + captive DNS（APSTA 让 STA 接口可扫描） */
 static void enter_setup_mode(void)
 {
+    s_state=WIFI_STATE_SETUP;
+    if(s_retry_timer)esp_timer_stop(s_retry_timer);
     ESP_LOGI(TAG, "enter setup mode (AP: %s)", s_ap_ssid);
     stop_http_server();               /* 幂等 */
     esp_wifi_stop();
@@ -406,7 +421,10 @@ static void connect_sta(const char *ssid, const char *pass, const char *gw)
 {
     ESP_LOGI(TAG, "connecting STA: %s (gw=%s)", ssid, gw && gw[0] ? gw : "default");
     stop_http_server();
-    if (s_state == WIFI_STATE_SETUP) {
+    s_state=WIFI_STATE_CONNECTING;
+    atomic_store(&s_expected_disconnect,true);
+    if(s_retry_timer)esp_timer_stop(s_retry_timer);
+    {
         /* 从配网模式切回：需要 stop/start，且此时可能是 APSTA 模式 */
         esp_wifi_stop();
     }
@@ -417,12 +435,13 @@ static void connect_sta(const char *ssid, const char *pass, const char *gw)
     sta_cfg.sta.pmf_cfg.capable = true;
     sta_cfg.sta.pmf_cfg.required = false;
 
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
-    esp_wifi_start();
+    esp_err_t err=esp_wifi_set_mode(WIFI_MODE_STA);
+    if(err==ESP_OK)err=esp_wifi_set_config(WIFI_IF_STA,&sta_cfg);
+    if(err==ESP_OK)err=esp_wifi_start();
     s_retries = 0;
-    s_state = WIFI_STATE_CONNECTING;
-    esp_wifi_connect();
+    atomic_store(&s_connect_pending,false);
+    if(err==ESP_OK)err=esp_wifi_connect();
+    if(err!=ESP_OK){s_state=WIFI_STATE_FAILED;ESP_LOGW(TAG,"connect request failed: %s",esp_err_to_name(err));}
 }
 
 /* 保存的凭据快照 + 延迟连接（定时器回调执行，避开 httpd handler 内切换） */
@@ -436,8 +455,9 @@ static void prov_timer_cb(void *arg)
     connect_sta(s_pending_ssid, s_pending_pass, s_pending_gw);
 }
 
-static void schedule_connect_sta(const char *ssid, const char *pass, const char *gw)
+static esp_err_t schedule_connect_sta(const char *ssid, const char *pass, const char *gw)
 {
+    if(atomic_exchange(&s_connect_pending,true))return ESP_ERR_INVALID_STATE;
     strncpy(s_pending_ssid, ssid, sizeof(s_pending_ssid) - 1);
     strncpy(s_pending_pass, pass, sizeof(s_pending_pass) - 1);
     strncpy(s_pending_gw, gw ? gw : "", sizeof(s_pending_gw) - 1);
@@ -446,10 +466,12 @@ static void schedule_connect_sta(const char *ssid, const char *pass, const char 
         .dispatch_method = ESP_TIMER_TASK,
         .name = "prov_connect",
     };
-    esp_timer_handle_t t = NULL;
-    if (esp_timer_create(&args, &t) == ESP_OK) {
-        esp_timer_start_once(t, 1500 * 1000);
-    }
+    s_state=WIFI_STATE_CONNECTING;
+    esp_err_t err=ESP_OK;
+    if(!s_connect_timer)err=esp_timer_create(&args,&s_connect_timer);
+    if(err==ESP_OK)err=esp_timer_start_once(s_connect_timer,1500*1000);
+    if(err!=ESP_OK){atomic_store(&s_connect_pending,false);s_state=WIFI_STATE_FAILED;}
+    return err;
 }
 
 /* ---------------------------------------------------------------------------
@@ -482,35 +504,46 @@ int wifi_prov_scan(char ssids[][33], int8_t rssi[], int max)
     return cnt;
 }
 
-void wifi_prov_submit(const char *ssid, const char *pass)
+esp_err_t wifi_prov_submit(const char *ssid, const char *pass)
 {
-    if (!ssid || ssid[0] == '\0') {
-        return;
+    if (!ssid || !ssid[0] || strlen(ssid)>32 || (pass && strlen(pass)>64)) {
+        return ESP_ERR_INVALID_ARG;
     }
-    nvs_save_creds(ssid, pass ? pass : "", "");
-    schedule_connect_sta(ssid, pass ? pass : "", "");
+    if(atomic_load(&s_connect_pending))return ESP_ERR_INVALID_STATE;
+    esp_err_t err=nvs_save_creds(ssid,pass?pass:"","");
+    return err==ESP_OK?schedule_connect_sta(ssid,pass?pass:"",""):err;
 }
 
 /* ---------------------------------------------------------------------------
  * 事件处理
  * ------------------------------------------------------------------------- */
+static void retry_timer_cb(void *arg)
+{
+    (void)arg;
+    if(s_state!=WIFI_STATE_SETUP && !atomic_load(&s_connect_pending)){
+        s_state=WIFI_STATE_CONNECTING;
+        esp_err_t err=esp_wifi_connect();
+        if(err!=ESP_OK){
+            s_state=WIFI_STATE_FAILED;
+            if(s_retry_timer)esp_timer_start_once(s_retry_timer,5000*1000);
+        }
+    }
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg; (void)base; (void)data;
     if (id == WIFI_EVENT_STA_START) {
-        if (s_state == WIFI_STATE_CONNECTING) {
-            esp_wifi_connect();
-        }
+        /* Connection requests have a single owner (connect/retry timer). */
     } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_state == WIFI_STATE_CONNECTING || s_state == WIFI_STATE_CONNECTED) {
-            if (s_retries++ < STA_RETRY_MAX) {
-                ESP_LOGW(TAG, "sta disconnected, retry %d/%d", s_retries, STA_RETRY_MAX);
-                esp_wifi_connect();
-            } else {
-                ESP_LOGW(TAG, "sta failed after %d retries -> setup mode", STA_RETRY_MAX);
-                s_state = WIFI_STATE_FAILED;
-                enter_setup_mode();   /* 密码错/信号差 → 自动回配网模式 */
-            }
+        wifi_event_sta_disconnected_t *event=data;
+        if(event && event->reason==WIFI_REASON_ASSOC_LEAVE && atomic_exchange(&s_expected_disconnect,false))return;
+        if (s_state != WIFI_STATE_SETUP && !atomic_load(&s_connect_pending)) {
+            if(s_retries<STA_RETRY_MAX)++s_retries;
+            s_state=s_retries<STA_RETRY_MAX?WIFI_STATE_CONNECTING:WIFI_STATE_FAILED;
+            unsigned delay=s_retries<STA_RETRY_MAX?500:5000;
+            ESP_LOGW(TAG,"link lost, reconnect in %ums",delay);
+            if(s_retry_timer){esp_timer_stop(s_retry_timer);esp_timer_start_once(s_retry_timer,delay*1000u);}
         }
     } else if (id == WIFI_EVENT_AP_START) {
         ESP_LOGI(TAG, "AP started (192.168.4.1)");
@@ -525,6 +558,8 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&e->ip_info.ip));
         s_retries = 0;
         s_state = WIFI_STATE_CONNECTED;
+        atomic_store(&s_expected_disconnect,false);
+        if(s_retry_timer)esp_timer_stop(s_retry_timer);
         /* 关闭 WiFi 省电：默认 WIFI_PS_MIN_MODEM 会让射频在信标间隔间休眠，
          * 收音频流时产生周期性 ~100-200ms 延迟尖峰 → 声音一卡一卡。电台靠持续下行，关省电。 */
         esp_wifi_set_ps(WIFI_PS_NONE);
@@ -537,6 +572,10 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
  * ------------------------------------------------------------------------- */
 esp_err_t wifi_prov_start(void)
 {
+    if(s_started)return ESP_OK;
+    esp_timer_create_args_t retry={.callback=retry_timer_cb,.name="wifi_retry"};
+    esp_err_t timer_err=esp_timer_create(&retry,&s_retry_timer);
+    if(timer_err!=ESP_OK)return timer_err;
     if (!s_handlers_registered) {
         esp_event_handler_instance_t h1, h2;
         esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
@@ -551,6 +590,12 @@ esp_err_t wifi_prov_start(void)
     esp_wifi_get_mac(WIFI_IF_AP, mac);
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s%02X%02X", AP_SSID_PREFIX, mac[4], mac[5]);
 
+    s_started=true;
+    if(wifi_prov_observed_state(WIFI_STATE_CONNECTING,false,s_ip,sizeof(s_ip))==WIFI_STATE_CONNECTED){
+        s_state=WIFI_STATE_CONNECTED;
+        esp_wifi_set_ps(WIFI_PS_NONE);
+        return ESP_OK;
+    }
     char ssid[33] = {0}, pass[65] = {0}, gw[64] = {0};
     if (nvs_load_creds(ssid, sizeof(ssid), pass, sizeof(pass), gw, sizeof(gw))) {
         connect_sta(ssid, pass, gw);
@@ -574,8 +619,17 @@ bool wifi_prov_erase_credentials(void)
     return true;
 }
 
-wifi_prov_state_t wifi_prov_get_state(void) { return s_state; }
-const char *wifi_prov_get_ip(void)          { return s_ip; }
+wifi_prov_state_t wifi_prov_get_state(void)
+{
+    wifi_prov_state_t state=wifi_prov_observed_state(s_state,atomic_load(&s_connect_pending),NULL,0);
+    if(state==WIFI_STATE_CONNECTED)s_state=state;
+    return state;
+}
+const char *wifi_prov_get_ip(void)
+{
+    wifi_prov_observed_state(s_state,atomic_load(&s_connect_pending),s_ip,sizeof(s_ip));
+    return s_ip;
+}
 bool wifi_prov_is_setup_mode(void)          { return s_state == WIFI_STATE_SETUP; }
 
 void wifi_prov_get_ap_ssid(char *out, size_t outlen)

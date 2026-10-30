@@ -42,6 +42,7 @@ typedef struct {
 } rk_theme_t;
 
 void              rk_theme_set(bool night);
+void              rk_theme_apply(const rk_theme_t *palette);
 bool              rk_theme_is_night(void);
 const rk_theme_t *rk_theme(void);
 
@@ -91,6 +92,7 @@ typedef enum {
     RK_ICON_NEXT,
     RK_ICON_CLOSE,
     RK_ICON_CHEVRON,
+    RK_ICON_BACK,
     RK_ICON_LIST,
 } rk_icon_t;
 
@@ -121,6 +123,10 @@ typedef struct {
     lv_obj_t *root;
     lv_obj_t *body;
     lv_obj_t *title;
+    lv_obj_t *back;
+    sdgoods_tap_cb_t back_cb;
+    void *back_ud;
+    bool closing;
     int       rows;
     sdgoods_tap_ctx_t close_ctx;    /* 页头关闭按钮的位移守卫上下文（调用方静态存储） */
     sdgoods_tap_ctx_t action_ctx;

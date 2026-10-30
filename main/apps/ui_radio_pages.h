@@ -17,8 +17,8 @@ typedef struct {
     void (*play_index)(int idx);
     /* 城市：空串 = 自动定位。内部会重建界面并重拉目录。 */
     void (*set_city)(const char *city_zh);
-    /* 主题：true = 夜色。内部会重建界面。 */
-    void (*set_night)(bool night);
+    /* Apply a stable registered skin without restarting the audio player. */
+    bool (*set_skin)(int skin);
     /* 定时休眠分钟（0 = 关） */
     void (*set_sleep)(int minutes);
     /* 重新拉取电台目录 */
@@ -28,6 +28,8 @@ typedef struct {
     int         (*count)(void);
     const char *(*city)(void);        /* 当前城市标签（"自动定位" / "上海"） */
     int         (*sleep_min)(void);
+    int         (*skin)(void);
+    bool        (*loading)(void);
 } radio_pages_ctl_t;
 
 void radio_pages_init(const radio_pages_ctl_t *ctl);
