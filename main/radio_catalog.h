@@ -18,7 +18,7 @@
 #include <stdint.h>
 
 #define RADIO_CATALOG_MAX  64
-#define RADIO_NAME_MAX     48
+#define RADIO_NAME_MAX     128
 #define RADIO_URL_MAX      200
 #define RADIO_CODEC_MAX    8
 #define RADIO_COUNTRY_MAX  4

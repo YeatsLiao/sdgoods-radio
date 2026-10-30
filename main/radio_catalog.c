@@ -13,6 +13,7 @@
  */
 
 #include "radio_catalog.h"
+#include "radio_station_identity.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -35,7 +36,7 @@ static const char *TAG = "radio_catalog";
 #define COUNTRY_LIMIT  40
 #define GLOBAL_LIMIT   24
 
-static radio_station_t s_stations[RADIO_CATALOG_MAX];
+static radio_station_t *s_stations;
 static int             s_count;
 static char            s_country[RADIO_COUNTRY_MAX] = "";
 static char            s_city[24] = "";
@@ -64,7 +65,7 @@ float radio_parse_freq(const char *name)
     if (!name) {
         return 0.0f;
     }
-    bool has_fm = contains_ci(name, "fm");
+    bool has_fm = contains_ci(name, "fm") || contains_ci(name, "mhz");
     float best = 0.0f;
     int best_conf = 0;
 
@@ -92,6 +93,8 @@ float radio_parse_freq(const char *name)
             if (v >= 87.0f && v <= 108.0f) {
                 conf = has_fm ? 3 : 2;
             }
+        } else if (has_fm && (v=strtof(tok,NULL))>=87.0f && v<=108.0f) {
+            conf = 3;  /* FM 89 / FM 101 are valid integer frequencies. */
         } else if (ti == 3 || ti == 4) {
             v = strtof(tok, NULL) / 10.0f;   /* 1011 -> 101.1，927 -> 92.7 */
             if (v >= 87.0f && v <= 108.0f) {
@@ -103,7 +106,7 @@ float radio_parse_freq(const char *name)
             best = v;
         }
     }
-    return best;
+    return best>0.0f?best:radio_station_known_frequency(name);
 }
 
 /* ---------------------------------------------------------------------------
@@ -246,19 +249,24 @@ static bool append_station(const cJSON *item)
     if (!url || url[0] == '\0' || !name || !name[0]) {
         return false;
     }
-    if (!stream_playable(codec, url) || already_have(url)) {
+    if (!stream_playable(codec, url) || jint(item,"hls",0) || already_have(url) || strlen(url)>=RADIO_URL_MAX) {
         return false;
     }
     radio_station_t *st = &s_stations[s_count];
     memset(st, 0, sizeof(*st));
-    strncpy(st->name, name, RADIO_NAME_MAX - 1);
+    radio_station_copy_utf8(name,st->name,sizeof(st->name));
     strncpy(st->url, url, RADIO_URL_MAX - 1);
     strncpy(st->codec, codec, RADIO_CODEC_MAX - 1);
     strncpy(st->country, jstr(item, "countrycode", ""), RADIO_COUNTRY_MAX - 1);
     strncpy(st->tag, jstr(item, "tags", ""), RADIO_TAG_MAX - 1);
     st->bitrate = (uint32_t)jint(item, "bitrate", 0);
     st->votes = jint(item, "votes", 0);
-    st->freq_mhz = radio_parse_freq(st->name);
+    /* Parse before truncating the display buffer: FM may be at the end. */
+    st->freq_mhz = radio_parse_freq(name);
+    if(st->freq_mhz<=0.0f){
+        const char *tags=jstr(item,"tags","");
+        if(contains_ci(tags,"fm") || contains_ci(tags,"mhz"))st->freq_mhz=radio_parse_freq(tags);
+    }
     s_count++;
     return true;
 }
@@ -399,7 +407,7 @@ static void load_fallback(void)
         st->freq_mhz = radio_parse_freq(st->name);
         s_count++;
     }
-    snprintf(s_city, sizeof(s_city), "离线精选");
+    snprintf(s_city, sizeof(s_city), "预设电台");
     ESP_LOGW(TAG, "using built-in fallback list (%d stations)", s_count);
 }
 
@@ -408,16 +416,20 @@ static void load_fallback(void)
  * ------------------------------------------------------------------------- */
 int radio_catalog_load(const char *city_zh)
 {
+    if(!s_stations)s_stations=heap_caps_calloc(RADIO_CATALOG_MAX,sizeof(*s_stations),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(!s_stations){ESP_LOGE(TAG,"no PSRAM for station catalog");return 0;}
+    char cc[RADIO_COUNTRY_MAX] = "";
+    snprintf(cc,sizeof(cc),"%s",s_country);
     s_count = 0;
     s_country[0] = '\0';
     s_city[0] = '\0';
 
-    char cc[RADIO_COUNTRY_MAX] = "";
     char auto_city[24] = "";
-    if (fetch_place(cc, sizeof(cc), auto_city, sizeof(auto_city))) {
+    if ((!city_zh || !city_zh[0]) && fetch_place(cc, sizeof(cc), auto_city, sizeof(auto_city))) {
         strncpy(s_country, cc, sizeof(s_country) - 1);
         ESP_LOGI(TAG, "located country=%s city=%s", cc, auto_city);
     }
+    snprintf(s_country,sizeof(s_country),"%s",cc);
 
     const char *want = (city_zh && city_zh[0]) ? city_zh : (auto_city[0] ? auto_city : NULL);
     if (want) {
