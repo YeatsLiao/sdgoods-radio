@@ -1,7 +1,10 @@
 # 城市电台 · 重构过程记录（DEVLOG）
 
 > 目标：把 `main/apps/` 里的电台应用从「功能演示」重做成**可长期放在桌面上的产品**。
-> 设计规格见 [UI_REDESIGN.md](UI_REDESIGN.md)；本文件记录**为什么这么改、踩了哪些坑、怎么验证**。
+> 设计规格见 UI_REDESIGN.md（已删，git 历史可查）；本文件记录**为什么这么改、踩了哪些坑、怎么验证**。
+>
+> ⏭️ 本日志记到 2026-10-27（§17）；之后的 V3 皮肤演进（rc1–rc8、13 套）逐版记录
+> 见 git 历史与各 dist 发布包内文档。
 >
 > 硬件：SDGOODS ESP32-S3 + 360×360 圆屏（ST77916）+ PCM5101 I2S + 无键盘鼠标
 > 软件：ESP-IDF 5.5.3 / LVGL 8.3 / 原生 ESP-IDF 工程（非 Arduino）
@@ -339,7 +342,7 @@ sdgoods-radio/
 整理过程中要注意的三件事：
 
 1. **`build/` 必须删掉重建**：`build/CMakeCache.txt` 里全是绝对路径，目录一移就会报找不到源文件。
-2. **两份 `ARCHITECTURE.md` 不能撞名**：电台那份留在 `docs/ARCHITECTURE.md`，
+2. **两份 `ARCHITECTURE.md` 不能撞名**：电台那份留在 `docs/ARCHITECTURE.md`（rc8 收尾后已随 radio 文档整体移入 `docs/radio/`），
    平台那份改名为 `docs/PLATFORM_ARCHITECTURE.md`；平台 README 同样变成 `docs/PLATFORM.md`。
 3. **`.gitignore` 里的 `shots/` 会连 `docs/shots/` 一起忽略**（该规则本意是忽略根目录截图输出），
    已改成只忽略 `shot_*.jpg/png`，保证验收截图能进仓库。

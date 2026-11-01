@@ -36,7 +36,7 @@ SDGOODS-ESP32S3/
 
 > **别动**：`components/sdgoods_board/src/sdgoods_lvgl.c` 的绘制缓冲配置
 > （双缓冲 8 行、放 INTERNAL SRAM）—— 改动容易导致屏上出现黑条/红线。
-> 理由见 `docs/ARCHITECTURE.md` 的显示链路一节。
+> 理由见 `docs/PLATFORM_ARCHITECTURE.md` 的显示链路一节。
 
 ## 1. 环境
 

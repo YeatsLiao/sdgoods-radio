@@ -438,7 +438,7 @@ python3 tools/font_metrics.py --strings "谷仓共创计划,按电源键返回"
 USB-Serial-JTAG 要约 **33 秒**，所以"手势到不了的界面"（启动台、菜单、关于）
 在烧板子之前只能靠这个工具确认。
 验证 UI 时如需自动走遍界面，可临时加一个"串口数字键 -> 切页"的探针
-（见 `docs/ARCHITECTURE.md` §6 末尾的做法），**验证完必须删掉**。
+（做法可查 git 历史中的 docs/radio/ARCHITECTURE.md §6），**验证完必须删掉**。
 
 ---
 

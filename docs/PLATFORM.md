@@ -316,7 +316,7 @@ LICENSING.md  TRADEMARK.md  NOTICE  LICENSE
 | [`../AGENTS.md`](../AGENTS.md) | ★ AI 改代码的编译方式、两层边界、硬约束、提交前检查清单 |
 | [`docs/ENVIRONMENT.md`](ENVIRONMENT.md) | 开发环境要求与安装（Python / ESP-IDF / esptool） |
 | [`docs/BUILD.md`](BUILD.md) | 编译 / 烧录 / 打包分发 |
-| [`docs/ARCHITECTURE.md`](PLATFORM_ARCHITECTURE.md) | 分层设计、钩子机制、联机同步、调试链路 |
+| [`docs/PLATFORM_ARCHITECTURE.md`](PLATFORM_ARCHITECTURE.md) | 分层设计、钩子机制、联机同步、调试链路 |
 | [`docs/APP_SDK.md`](APP_SDK.md) | app 侧 SDK 与多/单应用模式检测 |
 | [`docs/SINGLE_APP_FIRMWARE.md`](SINGLE_APP_FIRMWARE.md) | 把应用当主机固件直启（单应用模式） |
 | [`docs/STANDALONE_PROJECT.md`](STANDALONE_PROJECT.md) | 独立工程完整改造流程（不派生、手工裁剪时用） |
