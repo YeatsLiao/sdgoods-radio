@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 from PIL import Image, ImageOps
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 LAYOUT = (ROOT / "main/apps/ui_radio_skin.h").read_text(encoding="utf-8")
 
 

@@ -3,8 +3,8 @@
  * Actual Wi-Fi provider/state observer with deterministic SDK shims.
  */
 #include "network_stubs.h"
-#include "../../main/wifi_prov.c"
-#include "../../main/wifi_prov_status.c"
+#include "../../../main/wifi_prov.c"
+#include "../../../main/wifi_prov_status.c"
 
 static bool associated,netif_ready=true,lease_ready=true,fail_nvs,fail_timer;
 static uint32_t ip_address;

@@ -5,7 +5,7 @@
  */
 #include "player_stubs.h"
 #include <setjmp.h>
-#include "../../../main/radio_player.c"
+#include "../../../../main/radio_player.c"
 
 enum { NORMAL, SLOW, SUPERSEDE, BAD_CODEC, NO_PROGRESS, START_FAIL, PAUSE_FIRST, EMPTY_STREAM, WRONG_HINT, WRITE_FAIL, SHORT_GAP };
 static int mode, reads, decoded, starts, writes, allocated, opens, codec_type;

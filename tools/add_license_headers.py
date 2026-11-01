@@ -14,7 +14,7 @@
 
   平台层  components/sdgoods_board/**（排除 fonts/）  -> Apache-2.0
   应用层  main/**（排除 patches/）                     -> Apache-2.0
-  工具    tools/*.py                                  -> Apache-2.0
+  工具    tools/**/*.py（递归）                                  -> Apache-2.0
 
 本仓库（平台层与应用层）统一以 Apache-2.0 发布，可自由商用、可闭源分发。
 
@@ -102,7 +102,7 @@ def collect():
         app += glob.glob(os.path.join(REPO, "main/**", ext), recursive=True)
     app = [p for p in app if "/patches/" not in p.replace("\\", "/")]
 
-    tools = [p for p in glob.glob(os.path.join(REPO, "tools", "*.py"))
+    tools = [p for p in glob.glob(os.path.join(REPO, "tools", "**", "*.py"), recursive=True)
              if os.path.abspath(p) != os.path.abspath(__file__)]
 
     return sorted(set(plat)), sorted(set(app)), sorted(set(tools))

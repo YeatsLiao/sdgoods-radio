@@ -23,8 +23,8 @@ import re
 from pathlib import Path
 from PIL import Image, ImageOps
 
-ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / 'docs/design/radio-v3/proposals/vinyl-redraw-20261030'
+ROOT = Path(__file__).resolve().parents[2]
+SOURCE = ROOT / 'docs/radio/design/skin'
 OUT = ROOT / 'main/assets/radio/redraw'
 LAYOUT=(ROOT/'main/apps/ui_radio_skin.h').read_text(encoding='utf-8')
 

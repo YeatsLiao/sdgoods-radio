@@ -25,9 +25,9 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageDraw
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "output/radio-host-current"
-HOST = ROOT / "tools/host_radio"
+HOST = ROOT / "tools/radio/host_radio"
 LVGL = ROOT / "managed_components/lvgl__lvgl"
 
 
