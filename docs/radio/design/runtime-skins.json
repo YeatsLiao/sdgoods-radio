@@ -1,0 +1,23 @@
+{
+  "source": "main/apps/ui_radio_skin.c",
+  "ids": [
+    "paper-radio",
+    "dot-matrix",
+    "pixel-host",
+    "sound-field",
+    "cat-dj",
+    "space-signal",
+    "seaside-sunset",
+    "rainy-shop",
+    "pocket-player",
+    "garden-capybara",
+    "vinyl-pixel",
+    "vinyl-pop",
+    "vinyl-night"
+  ],
+  "legacy_aliases": {
+    "editorial": "paper-radio",
+    "vinyl-club": "vinyl-pixel"
+  },
+  "historical_concepts": "skins.json"
+}

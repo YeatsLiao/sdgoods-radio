@@ -1,8 +1,8 @@
 # SDGOODS Radio · 谷仓次元屏桌面网络电台
 
 把谷仓次元屏（ESP32-S3 · 360×360 圆屏）变成一台**桌面网络收音机**：
-连 WiFi 播城市网络电台，**13 套可切换的像素皮肤**（多套带常驻动效），触摸滑动手势换台换肤，
-无限曲库、零存储占用。本仓库 = **谷仓 SDGOODS 平台基座** + **radio 演示应用**（`main/`），是平台二次开发的完整参考实现。
+连 WiFi 播城市网络电台，**13 套可切换的皮肤**（多套带常驻动效），触摸滑动手势换台换肤，
+目录与播放依赖网络，图片和字体随应用固件存储。本仓库 = **谷仓 SDGOODS 平台基座** + **radio 演示应用**（`main/`），是平台二次开发的完整参考实现。
 
 | 13 套皮肤总览 | 动效演示 | 真机 |
 | --- | --- | --- |
@@ -15,25 +15,25 @@
 ## 特性
 
 * **13 套皮肤，主屏左右滑即换**：纸感收音机、点阵电波、像素主播、声波极简、猫咪 DJ、太空电波、
-  海边落日、雨夜便利店、掌机音乐盒、像素花园 + 三款像素唱片，首尾循环、选择持久化。
+  海边落日、雨夜便利店、掌机音乐盒、像素花园 + 三款唱片主题，首尾循环、选择持久化。
   多套带常驻动效：暂停/缓冲时继续动，进入二级页冻结，返回接着动。
-* **拖拽调台 + 滑动手势**：左右箭头切相邻台（首尾循环），主屏上滑开选台页（每页 3 条、左右滑翻页，最多 64 台），
+* **点按切台 + 滑动手势**：左右箭头切相邻台（首尾循环），主屏上滑开选台页（每页 3 条、左右滑翻页，最多 64 台），
   顶部下滑开平台控制中心；不与设备级导航抢手势。
-* **城市电台目录**：联网后按城市查 Radio Browser（去重 + 编码过滤，上限 64 条），定位失败退内置 3 台兜底；
-  连播失败自动跳台，重连 2 次跳下一台、连续 3 台失败停下，12s 首帧看门狗防无限「缓冲中」。
+* **城市电台目录**：联网后按城市查 Radio Browser（去重 + 编码过滤，上限 64 条），全部目录查询均无结果时退内置 3 台兜底；
+  流媒体超时和重试由播放器处理，最终失败时显示重试提示。
 * **台名与频率识别**：品牌短名 + 已知 FM 频率映射（如西湖之声 FM 105.4）；没有可靠频率的网络台
   显示目录编号（`CH 03` / 「网络频道」），**不编造 MHz**。
 * **MP3 / AAC 双解码**：独立网络生产者 + 解码消费者任务，64KB PSRAM 环形缓冲，302 跟跳，
   采样率/声道运行时自适应，解不出自动改判兜底。
-* **圆屏软键盘**：WiFi 密码用中央分页大键盘（5×3 字符区），覆盖全部 95 个可打印 ASCII，边缘无难点键。
-* **全部自绘**：图标是 `lv_draw_*` 矢量，角色/场景是低色数索引素材 + LVGL 时钟驱动，不依赖图标字体与帧序列。
-* **中英双语**：界面文案跟随平台语言设置；中文字形覆盖经逐字校验，台名走 GB2312 一级子集，不会出现 `?`。
+* **圆屏软键盘**：WiFi 密码用中央分页大键盘（5×3 字符区），覆盖全部 95 个可打印 ASCII，所有按键收进中央区域，物理触摸手感仍需真机验证。
+* **动态界面与 AI 素材结合**：图标是 `lv_draw_*` 矢量，角色/场景是低色数索引素材 + LVGL 时钟驱动，不依赖图标字体与帧序列。
+* **中英双语**：应用启动默认中文，保留中英文文案；中文字形覆盖经逐字校验，台名走 GB2312 一级子集，罕见字仍可能降级显示。
 
 ## 操作速查
 
 | 手势 / 位置 | 行为 |
 | --- | --- |
-| 主屏**左/右滑** | 上一套 / 下一套皮肤（松手切换并保存） |
+| 主屏**左/右滑** | 左滑下一套 / 右滑上一套皮肤（松手切换并保存） |
 | 主屏**上滑** 或底部列表图标 | 打开选台页；列表再次上滑返回主屏（不打断播放） |
 | 底部**左右箭头** | 上一台 / 下一台（首尾循环） |
 | 中间**播放键** | 暂停 / 恢复；失败后点按按缓存 URL 重试原台 |
@@ -74,44 +74,55 @@ sdgoods-radio/
 
 ## 构建与烧录
 
-先跑环境自检（缺什么、怎么装，见 [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)）：
+已安装并激活 **ESP-IDF 5.5** 后，在仓库根目录执行：
 
 ```bash
-python3 tools/check_env.py
+idf.py build
+bash tools/flash_local.sh -b build -p COM6
 ```
 
-然后一行构建 / 烧录（封装了 ESP-IDF 环境坑，Windows 用 Git Bash）：
+`COM6` 换成实际串口。Windows 可在已激活 IDF 的 Git Bash 中执行；首次安装环境见
+[环境说明](docs/ENVIRONMENT.md)。日常改代码、重新烧录只需以上两步。
+脚本自动写入 `platform/prebuilt/` 的官方引导层和刚生成的 `build/SDGOODS_RADIO.bin`。
+
+也可用现有封装一条命令完成（默认构建目录为 `build_pub`）：
 
 ```bash
-tools/build.sh            # 构建
-tools/build.sh flash      # 构建 + 烧录（自动用 platform/prebuilt 官方引导层）
-tools/build.sh dev        # 构建 + 烧录 + 串口监视
+bash tools/build.sh flash -p COM6
 ```
 
-等价手写：`idf.py set-target esp32s3`（仅首次）→ `idf.py build` → `idf.py -p <串口> flash`。
-串口号会变，不要写死；报 `Resource busy` 先关掉占用串口的浏览器页签。
+串口被占用时，先关闭使用它的串口监视器或网页。本地脚本会写引导层、分区表和 factory 应用区，
+已有多应用设备应通过平台安装应用包，安装流程见 [发布说明](docs/radio/RELEASE.md)。
 
-产物 `build/SDGOODS_RADIO.bin`：app 分区上限 3,040,870 B（2.9 MiB），**当前仅剩约 4% 余量**，
-加大素材前先评估容量。
+<details>
+<summary>首次配置、字体与开发自测（按需执行）</summary>
 
-**新增中文文案后必须重跑字体**，否则新字显示成方框：
+首次配置或环境有问题时运行 `python tools/check_env.py`；更换芯片目标才需要重新设置 target。
+增加中文字符后再生成字体，字体源码已经随仓库提供，普通构建不用每次重跑：
 
 ```bash
-python tools/gen_fonts.py          # 重扫源码生成子集字体
-python tools/gen_fonts.py --check  # 只校验缺字
-python tools/font_metrics.py       # 圆屏弦宽 / 折行检查
+python tools/gen_fonts.py --bin ./node_modules/.bin/lv_font_conv
+python tools/gen_fonts.py --check
+python tools/font_metrics.py
 ```
 
-## 自测（不接键鼠也能验）
+Windows 的转换器路径使用 `node_modules/.bin/lv_font_conv.cmd`。完整字体说明见
+[环境说明](docs/ENVIRONMENT.md)。
+
+开发自测入口：
 
 ```bash
-python tools/radio/test_radio_host.py   # 主机离线渲染 + 回归：真 LVGL 渲染 13 套皮肤、
-                                  # 动画帧、手势路由、播放器/Wi-Fi 状态机用例
-python tools/screenshot_recv.py -p <串口> -o shot.png -t   # 真机截屏（串口发 's'）
+python tools/radio/check_project_layout.py
+python tools/radio/check_radio_keyboard.py
+python tools/radio/test_radio_host.py
+python tools/screenshot_recv.py -p COM6 -o output/shot.png -t
 ```
 
-主机回归输出在 `output/radio-host-current/`（含 `skins-overview.png` 与 `animated-skins.gif`），
-UI 改动先看主机渲染，再上真机截屏核对。
+主机渲染需要原生 gcc 与 Pillow，输出位于 `output/radio-host-current/`；它属于开发验证，
+不是普通构建的前置步骤。串口截图需要连接设备。应用包大小以本次构建结果为准，平台上限为
+3,040,870 B（2.9 MiB），不要沿用旧版本的余量百分比。
+
+</details>
 
 ## 发布到谷仓开放平台
 
@@ -141,13 +152,12 @@ UI 改动先看主机渲染，再上真机截屏核对。
 
 ## 当前状态与已知问题
 
-- **1.1.0-rc8**（13 套皮肤）已编译、主机回归 PASS；最近一次烧录真机与打包的版本是 rc7
-  （逐版交付记录见 git 历史与 dist 发布包内文档）。
+- 当前源码版本以 `version.txt` 为准（目前为 **1.1.0**），包含 13 套风格。历史构建、发布包、真机截图不能证明当前源码已完成验收，参见 [收尾记录与待办](docs/radio/STATUS.md)。
 - **待真机长期验收**：物理触控手感、持续音频质量、长时间稳定性——主机回归不能替代这些。
 - 部分 CN 台源已失效或仅服务本地网络，靠「重连 2 次 → 跳台 → 连续 3 台失败停下」策略兜底；
   台源连通性记忆、收藏 / 节目单 / ICY 曲名未做（见
   [RADIO_STREAMING_PLAN.md](docs/radio/RADIO_STREAMING_PLAN.md)）。
-- 圆屏列表页可视行数有限，滚动无指示。
+- 纸感贴图圆角仍有用户反馈待关闭：需要确认设备实际固件版本并抓取 COM6 新截图；本轮未连接设备。
 
 ## 许可与归属
 

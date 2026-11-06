@@ -1,7 +1,7 @@
 # Radio 应用文档索引
 
 本目录收 **radio 应用专属文档**（平台基座文档在 `docs/` 根，设计档案与截图在 [design/](design/README.md)）。
-当前版本 **1.1.0-rc8**：13 套皮肤已接入源码并编译通过（主机回归 PASS）。
+当前源码版本以根目录 `version.txt` 为准（目前 1.1.0），共 13 套皮肤。历史测试与当前源码验收分开记录，见 [STATUS.md](STATUS.md)。
 
 | 文档 | 内容 |
 | --- | --- |
@@ -13,4 +13,4 @@
 | [DEVLOG.md](DEVLOG.md) | 重构过程史（至 2026-10-27）：病灶、关键坑、验收 |
 
 > 历史逐版交付记录（RADIO_V3_RC1–RC7、V3_FIRMWARE_PLAN、VISUAL_TUNING、REDRAW_INTEGRATION、
-> PLAN、UI_REDESIGN、ARCHITECTURE）已移除：git 历史与各 `dist/radio-<ver>/` 发布包内均有存档。
+> PLAN、UI_REDESIGN、ARCHITECTURE）由之前的整理归档；需要回查时查看 git 历史及本机保留的 `dist/radio-<ver>/`，不能假设每个版本都有完整发布包。

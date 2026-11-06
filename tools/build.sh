@@ -35,10 +35,17 @@ fi
 CMD="build"
 BUILD="build_pub"
 EXTRA=()
+PORT_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         build|flash|monitor|dev) CMD="$1" ;;
-        -B) BUILD="$2"; shift ;;
+        -B|-p)
+            if [ $# -lt 2 ] || [ -z "$2" ]; then
+                echo "Missing value for $1" >&2
+                exit 2
+            fi
+            if [ "$1" = "-B" ]; then BUILD="$2"; else PORT_ARGS=(-p "$2"); fi
+            shift ;;
         *)  EXTRA+=("$1") ;;
     esac
     shift
@@ -49,7 +56,7 @@ run_idf() {
     env -u CODEBUDDY_SAFE_DELETE_SANDBOX \
         -u CODEBUDDY_BROKERED_FS_HOOK_ENABLED \
         -u CODEBUDDY_SAFE_DELETE_ENABLED \
-        idf.py -B "$BUILD" "$@"
+        idf.py -B "$BUILD" "${PORT_ARGS[@]}" "$@"
 }
 
 case "$CMD" in
@@ -57,14 +64,14 @@ case "$CMD" in
         run_idf build "${EXTRA[@]}"
         ;;
     flash)
-        run_idf build "${EXTRA[@]}" && bash tools/flash_local.sh -b "$BUILD"
+        run_idf build "${EXTRA[@]}" && bash tools/flash_local.sh -b "$BUILD" "${PORT_ARGS[@]}"
         ;;
     monitor)
         run_idf monitor "${EXTRA[@]}"
         ;;
     dev)
         run_idf build "${EXTRA[@]}" \
-            && bash tools/flash_local.sh -b "$BUILD" \
+            && bash tools/flash_local.sh -b "$BUILD" "${PORT_ARGS[@]}" \
             && run_idf monitor "${EXTRA[@]}"
         ;;
 esac

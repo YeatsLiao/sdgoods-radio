@@ -10,9 +10,9 @@
 #       所以直接烧平台预编译的 bootloader / partition-table，避免开发者自己编引导层。
 #
 # 用法：
-#   python3 tools/flash_local.sh                       # 自动探测串口，用默认构建目录 build_pub
-#   python3 tools/flash_local.sh -p /dev/cu.usbmodem1234
-#   python3 tools/flash_local.sh -p /dev/ttyUSB0 -b build_pub -B 921600
+#   bash tools/flash_local.sh                       # 自动探测串口，用默认构建目录 build_pub
+#   bash tools/flash_local.sh -p COM6 -b build
+#   bash tools/flash_local.sh -p /dev/ttyUSB0 -b build_pub -B 921600
 #
 set -euo pipefail
 

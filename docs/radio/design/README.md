@@ -1,12 +1,12 @@
-# 圆屏电台：十套风格档案
+# 圆屏电台：设计原稿与图像档案
 
-记录日期：2026-10-29。状态：**十套已接入 1.1.0-rc2 候选固件，尚待真机验收**。逐版交付记录见 git 历史与 dist 发布包内文档。
+原始十套概念图记录于 2026-10-29；当前源码为 13 套，运行时清单见 [runtime-skins.json](runtime-skins.json)，历史概念清单保留为 skins.json。逐版交付记录见 git 历史与 dist 发布包内文档。
 
 本目录按内容归类，不按版本分目录：说明文件平铺在根，**全部图片在 [skin/](skin/)**——
 
 - 概念图（AI 生图，非渲染结果）：`modern-four.png`、`pixel-six.png`、`cd-flat-pixel.png`
   及唱片/纸感重绘四张（见 [vinyl-redraw.md](vinyl-redraw.md)）。
-- 当前版本截图（1.1.0-rc8）：`skins-overview.png`、`animated-skins.gif`、`device.jpg`、
+- 历史归档图（包含电脑离线渲染和设备截图，不代表当前源码验收）：`skins-overview.png`、`animated-skins.gif`、`device.jpg`、
   `*-page.png` 页面图与 13 套 × 4 状态全量静帧。
 - 历史渲染验收图：`editorial*.png`、`dot-matrix*.png`、`*-review.png`。
 - [skins.json](skins.json)：十套稳定 ID 的机器可读清单。
@@ -71,6 +71,6 @@
 - 动画是后续制作项，当前参考图只有静态图，不代表已拥有序列帧。
 
 
-2026-10-30 RC3：大字编辑风和点阵电波的修订前真机截图（`before-*.jpg`）与修订后离线截图（`editorial*.png`、`dot-matrix*.png`）在本目录；诊断与验证边界见 git 历史中的当次修订记录。原始十套参考图继续保留。
+2026-10-30 RC3：大字编辑风和点阵电波的修订前真机截图（`before-*.jpg`）与修订后离线截图（`editorial*.png`、`dot-matrix*.png`）在 `skin/`；诊断与验证边界见 git 历史中的当次修订记录。原始十套参考图继续保留。
 
 
